@@ -1,125 +1,103 @@
-#Pre-Mortem Analysis Bot using forecasting-tools framework and custom research.
-Multi-model, multi-source research for scenario analysis, risk/opportunity synthesis, and final judgment.#
+# -*- coding: utf-8 -*-
+"""
+Pre-Mortem Analysis Bot (v5 - GPT-5 Integration)
 
-Models:
-- Narrative: Anthropic Claude 3 Opus, Mistral Large (via OpenRouter)
-- Analytical: OpenAI GPT-4o (via OpenRouter), OpenAI GPT-O3 (via OpenRouter)
-News/Research:
-- NewsAPI, AskNews, SerpAPI (parallel fallback)
-- Web scraping (DuckDuckGo + BeautifulSoup)
-Metaculus API for question sourcing.
+This script runs a multi-stage forecasting process on Metaculus questions.
+It now detects the question type and adapts its analysis:
+- For BINARY questions: Uses a "Failure vs. Success" framework.
+- For NUMERIC questions: Uses a "Surprisingly Low vs. Surprisingly High" framework.
 
-Environment:
-- OPENROUTER_API_KEY, METACULUS_TOKEN, NEWSAPI_API_KEY, ASKNEWS_API_KEY, SERPAPI_API_KEY
-
+This version is updated to use GPT-5 for all analytical tasks.
+"""
 import argparse
 import asyncio
 import logging
 import os
 from datetime import datetime
 
+import aiohttp
 import numpy as np
 import requests
 from bs4 import BeautifulSoup
-from forecasting_tools import (
-    ForecastBot,
-    GeneralLlm,
-    MetaculusApi,
-    MetaculusQuestion,
-    clean_indents,
-)
+from dotenv import load_dotenv
+from forecasting_tools import (ForecastBot, GeneralLlm, MetaculusApi,
+                               MetaculusQuestion, clean_indents)
 from newsapi import NewsApiClient
 
-# API KEYS
+# --- Setup and Configuration ---
+load_dotenv()
+
+# API Keys
 NEWSAPI_API_KEY = os.getenv("NEWSAPI_API_KEY")
-ASKNEWS_API_KEY = os.getenv("ASKNEWS_API_KEY")
+LINKUP_API_KEY = os.getenv("LINKUP_API_KEY")
 SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger("PreMortemAnalysisBot")
+# Basic Logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("PreMortemAnalysisBotV5")
 
-# --- LLM Clients (OpenRouter wrapper) ---
-
+# --- LLM Client (using OpenRouter) ---
 class OpenRouterLlm:
+    """A simple async client for the OpenRouter API."""
     def __init__(self, model: str):
+        if not OPENROUTER_API_KEY:
+            raise ValueError("OPENROUTER_API_KEY environment variable not set.")
         self.model = model
         self.api_key = OPENROUTER_API_KEY
         self.url = "https://openrouter.ai/api/v1/chat/completions"
 
-    async def invoke(self, prompt: str, temperature=0.7, max_tokens=1024):
-        import aiohttp
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-        data = {
-            "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens,
-            "temperature": temperature
-        }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(self.url, headers=headers, json=data) as resp:
-                if resp.status != 200:
-                    return f"[{self.model} error: {resp.status}]"
-                result = await resp.json()
-                try:
+    async def invoke(self, prompt: str, temperature=0.7, max_tokens=3000) -> str:
+        """Sends a prompt to the specified model via OpenRouter."""
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        data = {"model": self.model, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens, "temperature": temperature}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(self.url, headers=headers, json=data, timeout=240) as resp:
+                    if resp.status != 200:
+                        error_text = await resp.text()
+                        logger.error(f"OpenRouter Error: Status {resp.status} for model {self.model}. Response: {error_text}")
+                        return f"[{self.model} error: {resp.status}] - {error_text}"
+                    result = await resp.json()
                     return result['choices'][0]['message']['content']
-                except Exception:
-                    return str(result)
+        except Exception as e:
+            logger.error(f"An exception occurred while calling OpenRouter for model {self.model}: {e}")
+            return f"Exception during API call to {self.model}: {e}"
 
 # --- Research Clients ---
-
-class AskNewsClient:
+class LinkupClient:
+    """Client for the LinkUp Job Search API."""
     def __init__(self, api_key):
         self.api_key = api_key
-        self.url = "https://api.asknews.io/search"
+        self.url = "https://api.linkup.com/v1/jobs/search"
 
     async def search(self, query: str) -> str:
-        if not self.api_key:
-            return "AskNewsAPI key not set."
-        params = {
-            "q": query,
-            "api_key": self.api_key,
-            "limit": 5
-        }
-        import aiohttp
+        if not self.api_key: return "LinkUp API key not set."
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        params = {"q": query, "limit": 5}
         async with aiohttp.ClientSession() as session:
-            async with session.get(self.url, params=params) as resp:
-                if resp.status != 200:
-                    return f"[AskNews error: {resp.status}]"
-                result = await resp.json()
-                items = result.get("results", [])
-                return "\n".join([f"- {i.get('title','')}: {i.get('snippet','')}" for i in items])
+            async with session.get(self.url, headers=headers, params=params) as resp:
+                if resp.status != 200: return f"[LinkUp error: {resp.status}]"
+                jobs = (await resp.json()).get("jobs", [])
+                return "\n".join([f"- {job.get('title','')} at {job.get('company','')} ({job.get('location','')})" for job in jobs])
 
 class SerpApiClient:
+    """Client for SerpAPI."""
     def __init__(self, api_key):
         self.api_key = api_key
         self.url = "https://serpapi.com/search"
 
     async def search(self, query: str) -> str:
-        if not self.api_key:
-            return "SerpAPI key not set."
-        params = {
-            "q": query,
-            "api_key": self.api_key,
-            "num": 5,
-            "engine": "google"
-        }
-        import aiohttp
+        if not self.api_key: return "SerpAPI key not set."
+        params = {"q": query, "api_key": self.api_key, "num": 5, "engine": "google"}
         async with aiohttp.ClientSession() as session:
             async with session.get(self.url, params=params) as resp:
-                if resp.status != 200:
-                    return f"[SerpAPI error: {resp.status}]"
-                result = await resp.json()
-                items = result.get("organic_results", [])
+                if resp.status != 200: return f"[SerpAPI error: {resp.status}]"
+                items = (await resp.json()).get("organic_results", [])
                 return "\n".join([f"- {i.get('title','')}: {i.get('snippet','')}" for i in items])
 
 class WebScraper:
+    """Synchronous web scraper using DuckDuckGo and BeautifulSoup."""
     def perform_web_scrape(self, query: str) -> str:
         logger.info(f"[Web Scraper] Searching for: {query}")
         try:
@@ -138,200 +116,160 @@ class WebScraper:
             page_soup = BeautifulSoup(page_response.text, 'html.parser')
             paragraphs = page_soup.find_all('p')
             content = ' '.join([p.get_text() for p in paragraphs[:5]])
-            return f"- {content[:1500]}..."
+            return f"- Top result summary: {content[:1500]}..." if content else "No content found."
         except Exception as e:
             return f"Web scraping failed: {e}"
 
 # --- Hybrid Research Collector ---
-
-async def gather_research(query: str):
-    """
-    Runs NewsAPI, AskNews, SerpAPI, and web scraping in parallel, returns all results.
-    """
-    results = {}
+async def gather_research(query: str) -> dict:
+    """Runs all research sources in parallel and returns a dictionary of results."""
     loop = asyncio.get_running_loop()
+    
+    def query_newsapi():
+        if not NEWSAPI_API_KEY: return "NewsAPI key not set."
+        try:
+            newsapi = NewsApiClient(api_key=NEWSAPI_API_KEY)
+            response = newsapi.get_everything(q=query, language="en", sort_by="relevancy", page_size=5)
+            return "\n".join([f"- {a['title']}: {a.get('description', '')}" for a in response.get("articles", [])])
+        except Exception as e:
+            return f"NewsAPI failed: {e}"
+
     tasks = {
-        "newsapi": NewsApiClient(api_key=NEWSAPI_API_KEY).get_everything(q=query, language="en", sort_by="relevancy", page_size=5),
+        "newsapi": loop.run_in_executor(None, query_newsapi),
         "web_scrape": loop.run_in_executor(None, WebScraper().perform_web_scrape, query),
-        "asknews": AskNewsClient(ASKNEWS_API_KEY).search(query),
+        "linkup": LinkupClient(LINKUP_API_KEY).search(query),
         "serpapi": SerpApiClient(SERPAPI_API_KEY).search(query),
     }
-    # NewsAPI is sync, others async
-    futures = [
-        asyncio.create_task(tasks["asknews"]),
-        asyncio.create_task(tasks["serpapi"]),
-        tasks["newsapi"],  # sync
-        tasks["web_scrape"],  # sync
-    ]
-    results_list = await asyncio.gather(*futures, return_exceptions=True)
-    results['asknews'], results['serpapi'], newsapi_result, webscrape_result = results_list
-    # Format NewsAPI
-    try:
-        if isinstance(newsapi_result, dict) and newsapi_result.get("articles"):
-            articles = newsapi_result.get("articles", [])
-            results['newsapi'] = "\n".join([f"- {a['title']}: {a.get('description', '')}" for a in articles])
-        else:
-            results['newsapi'] = str(newsapi_result)
-    except Exception:
-        results['newsapi'] = str(newsapi_result)
-    results['web_scrape'] = webscrape_result
-    return results
+    
+    results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+    return dict(zip(tasks.keys(), results))
 
-# --- MAIN BOT ---
-
+# --- Main Pre-Mortem Analysis Bot ---
 class PreMortemAnalysisBot(ForecastBot):
-    """
-    Pre-Mortem Analysis forecasting bot.
-    Uses narrative models for scenario generation,
-    analytical models for synthesis and judgment.
-    """
-
+    """A forecasting bot that uses a pre-mortem analysis framework."""
     _max_concurrent_questions = 1
     _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
 
-    def _llm_config_defaults(self) -> dict[str, str]:
-        defaults = super()._llm_config_defaults()
-        defaults.update({
-            "narrative_1": "anthropic/claude-3-opus-20240229",
-            "narrative_2": "mistral/mistral-large",
-            "analytical_1": "openai/gpt-4o",
-            "analytical_2": "openai/gpt-o3",  # <-- OpenAI GPT-O3 as analytic 2
-        })
-        return defaults
+    # --- MODEL CONFIGURATION ---
+    # Updated to use specified frontier models.
+    MODEL_CONFIG = {
+        # Using the most powerful Claude model available for primary narrative generation.
+        "narrative_primary": "anthropic/claude-3-opus-20240229",
+        "narrative_secondary": "mistralai/mistral-large-latest",
+        
+        # Using the specified GPT-5 model for all analytical tasks.
+        "analytical_synthesis": "openai/gpt-5",
+        "analytical_judgment": "openai/gpt-5",
+    }
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.forecaster_keys = ["narrative_1", "narrative_2", "analytical_1", "analytical_2"]
-
-    async def run_research(self, question: MetaculusQuestion) -> str:
-        """
-        Collects research from all sources for context.
-        """
+    async def run_single_question(self, question: MetaculusQuestion):
+        """Orchestrates the analysis based on question type."""
         async with self._concurrency_limiter:
-            logger.info(f"--- Running Research for: {question.question_text} ---")
+            logger.info(f"--- Starting Analysis for: '{question.question_text}' (Type: {question.question_type}) ---")
+            
             research_results = await gather_research(question.question_text)
-            research = (
-                f"NewsAPI:\n{research_results.get('newsapi','')}\n\n"
-                f"Web Scrape:\n{research_results.get('web_scrape','')}\n\n"
-                f"AskNews:\n{research_results.get('asknews','')}\n\n"
-                f"SerpAPI:\n{research_results.get('serpapi','')}\n\n"
+            research_summary = (
+                f"--- RESEARCH SUMMARY ---\n"
+                f"NewsAPI:\n{research_results.get('newsapi','')}\n"
+                f"LinkUp (Job Postings):\n{research_results.get('linkup', '')}\n"
+                f"Web Scrape:\n{research_results.get('web_scrape','')}\n"
+                f"SerpAPI:\n{research_results.get('serpapi','')}\n"
+                f"--- END RESEARCH ---\n"
             )
-            logger.info(f"--- Research Complete for {question.page_url} ---")
-            return research
 
-    async def run_pre_mortem_analysis(self, question: MetaculusQuestion, research: str) -> dict:
-        """
-        Runs Pre-Mortem scenario generation, synthesis, and judgment.
-        """
-        # Step 1: Failure Narrative (Claude Opus)
-        fail_prompt = clean_indents(
-            f"""
-            It is one day after {question.resolution_date}.
-            The outcome of "{question.question_text}" was a surprising NO.
-            Write a plausible, detailed news article or after-action report from the future explaining exactly what went wrong and the sequence of events that led to this failure.
-            Research:\n{research}
-            """
-        )
-        fail_narrative = await OpenRouterLlm("anthropic/claude-3-opus-20240229").invoke(fail_prompt)
+            if question.question_type == 'binary':
+                await self._run_binary_analysis(question, research_summary)
+            elif question.question_type == 'numeric':
+                await self._run_numeric_analysis(question, research_summary)
+            else:
+                logger.warning(f"Unsupported question type '{question.question_type}' for question {question.id}. Skipping.")
 
-        # Step 2: Success Narrative (Mistral Large)
-        success_prompt = clean_indents(
-            f"""
-            It is one day after {question.resolution_date}.
-            The outcome of "{question.question_text}" was a surprising YES.
-            Write a plausible, detailed news article from the future explaining the key decisions, breakthroughs, and overlooked factors that led to this victory.
-            Research:\n{research}
-            """
-        )
-        success_narrative = await OpenRouterLlm("mistral/mistral-large").invoke(success_prompt)
+    async def _run_binary_analysis(self, question: MetaculusQuestion, research: str):
+        """Runs the pre-mortem for a binary (Yes/No) question."""
+        logger.info(f"[{question.id}] Running BINARY analysis...")
 
-        # Step 3: Synthesis (GPT-4o)
-        synthesis_prompt = clean_indents(
-            f"""
-            Read the following two future histories (failure and success narratives):
-            Failure Narrative:\n{fail_narrative}\n
-            Success Narrative:\n{success_narrative}\n
-            Extract a structured list of key insights. Populate two columns:
-            - Identified Risks (from the failure story)
-            - Identified Opportunities (from the success story)
-            Format as a Markdown table with Risks and Opportunities columns.
-            """
-        )
-        risks_opps_markdown = await OpenRouterLlm("openai/gpt-4o").invoke(synthesis_prompt)
+        fail_prompt = clean_indents(f"""It is one day after this question's resolution date ({question.resolution_date}). The outcome of "{question.question_text}" was a surprising NO. Write a plausible news article explaining what went wrong. Use the provided research to ground your narrative. Research:\n{research}""")
+        success_prompt = clean_indents(f"""It is one day after this question's resolution date ({question.resolution_date}). The outcome of "{question.question_text}" was a surprising YES. Write a plausible news article explaining what went right. Use the provided research to ground your narrative. Research:\n{research}""")
+        
+        narratives = await self._generate_narratives(self.MODEL_CONFIG["narrative_primary"], self.MODEL_CONFIG["narrative_secondary"], fail_prompt, success_prompt)
+        
+        synthesis_prompt = clean_indents(f"""Read the two narratives. Extract key insights into a Markdown table with two columns: 'Identified Risks (drives NO)' and 'Identified Opportunities (drives YES)'. Failure Narrative:\n{narratives[0]}\nSuccess Narrative:\n{narratives[1]}""")
+        synthesis = await OpenRouterLlm(self.MODEL_CONFIG["analytical_synthesis"]).invoke(synthesis_prompt)
 
-        # Step 4: Final Judgment (GPT-O3)
-        judgment_prompt = clean_indents(
-            f"""
-            You are the final super forecaster. Given the research and this specific list of risks and opportunities, what is your final probability that the question resolves YES?
-            Your rationale must explicitly address how these risks and opportunities influenced your decision.
-            Question: {question.question_text}
-            Resolution Date: {question.resolution_date}
-            Background: {question.background_info}
-            Fine Print: {question.fine_print}
-            Risks & Opportunities:\n{risks_opps_markdown}
-            Format: Probability: XX% Rationale: <detailed rationale>
-            """
-        )
-        final_prediction = await OpenRouterLlm("openai/gpt-o3").invoke(judgment_prompt)
+        judgment_prompt = clean_indents(f"""You are a super forecaster. Question: {question.question_text}. Based on the synthesized risks and opportunities below, provide a final probability that the question resolves YES. Weigh the risks against the opportunities in your rationale. Risks & Opportunities:\n{synthesis}\n\nFormat your output ONLY as:\nProbability: XX%\nRationale: <Your detailed reasoning>""")
+        prediction = await OpenRouterLlm(self.MODEL_CONFIG["analytical_judgment"]).invoke(judgment_prompt)
+        
+        self.print_analysis_results(question, narratives, synthesis, prediction, ("Failure Narrative", "Success Narrative"))
 
-        return {
-            "failure_narrative": fail_narrative,
-            "success_narrative": success_narrative,
-            "risks_opps_markdown": risks_opps_markdown,
-            "final_prediction": final_prediction,
-        }
+    async def _run_numeric_analysis(self, question: MetaculusQuestion, research: str):
+        """Runs the pre-mortem for a numeric question."""
+        logger.info(f"[{question.id}] Running NUMERIC analysis...")
 
-if __name__ == "__main__":
+        low_prompt = clean_indents(f"""It is one day after the resolution date. The final number for "{question.question_text}" was surprisingly LOW, far below the median expectation. Write a plausible news article explaining the constraints and factors that suppressed the outcome. Use the provided research. Research:\n{research}""")
+        high_prompt = clean_indents(f"""It is one day after the resolution date. The final number for "{question.question_text}" was surprisingly HIGH, far exceeding the median expectation. Write a plausible news article explaining the catalysts and breakthroughs that drove the outcome. Use the provided research. Research:\n{research}""")
+
+        narratives = await self._generate_narratives(self.MODEL_CONFIG["narrative_primary"], self.MODEL_CONFIG["narrative_secondary"], low_prompt, high_prompt)
+
+        synthesis_prompt = clean_indents(f"""Read the two narratives. Extract key drivers into a Markdown table with two columns: 'Downward Drivers (pushes number lower)' and 'Upward Drivers (pushes number higher)'. Low Outcome Narrative:\n{narratives[0]}\nHigh Outcome Narrative:\n{narratives[1]}""")
+        synthesis = await OpenRouterLlm(self.MODEL_CONFIG["analytical_synthesis"]).invoke(synthesis_prompt)
+
+        judgment_prompt = clean_indents(f"""You are a super forecaster. Question: {question.question_text}. Based on the synthesized drivers below, provide a numeric forecast. Weigh the upward vs. downward drivers in your rationale. Downward & Upward Drivers:\n{synthesis}\n\nFormat your output ONLY as:\nPoint Forecast: [Your single best numeric estimate]\nConfidence Interval (90%): [Lower bound] to [Upper bound]\nRationale: <Your detailed reasoning>""")
+        prediction = await OpenRouterLlm(self.MODEL_CONFIG["analytical_judgment"]).invoke(judgment_prompt)
+
+        self.print_analysis_results(question, narratives, synthesis, prediction, ("Low Outcome Narrative", "High Outcome Narrative"))
+
+    async def _generate_narratives(self, model1, model2, prompt1, prompt2) -> tuple[str, str]:
+        """Generates two narratives in parallel."""
+        tasks = [OpenRouterLlm(model1).invoke(prompt1), OpenRouterLlm(model2).invoke(prompt2)]
+        results = await asyncio.gather(*tasks)
+        return results[0], results[1]
+
+    def print_analysis_results(self, question, narratives, synthesis, prediction, narrative_titles):
+        """Formats and prints the final analysis."""
+        print("\n" + "="*80)
+        print(f"✅ ANALYSIS COMPLETE FOR: {question.question_text} (Type: {question.question_type})")
+        print(f"   URL: {question.page_url}")
+        print("="*80 + "\n")
+        print(f"--- 📉 {narrative_titles[0]} ({self.MODEL_CONFIG['narrative_primary']}) ---\n{narratives[0]}\n")
+        print(f"--- 📈 {narrative_titles[1]} ({self.MODEL_CONFIG['narrative_secondary']}) ---\n{narratives[1]}\n")
+        print(f"--- 📊 Synthesized Drivers/Risks ({self.MODEL_CONFIG['analytical_synthesis']}) ---\n{synthesis}\n")
+        print(f"--- 🎯 Final Judgment & Prediction ({self.MODEL_CONFIG['analytical_judgment']}) ---\n{prediction}\n")
+        print("="*80 + "\n")
+
+async def main():
+    """Main execution function."""
     parser = argparse.ArgumentParser(description="Run Pre-Mortem Analysis Bot on Metaculus questions.")
-    parser.add_argument(
-        "--mode", type=str, choices=["tournament", "test_questions"], default="tournament",
-        help="Run mode: tournament or test_questions."
-    )
-    parser.add_argument(
-        "--tournament-ids", nargs='+', type=str, default=[MetaculusApi.CURRENT_AI_COMPETITION_ID],
-        help="Tournament IDs to run on."
-    )
+    parser.add_argument("--tournament-ids", nargs='+', type=str, default=["minibench", "32813", "metaculus-cup-fall-2025"], help="Space-separated Metaculus tournament IDs.")
     args = parser.parse_args()
 
-    bot = PreMortemAnalysisBot(
-        llms={
-            "narrative_1": GeneralLlm(model="anthropic/claude-3-opus-20240229"),
-            "narrative_2": GeneralLlm(model="mistral/mistral-large"),
-            "analytical_1": GeneralLlm(model="openai/gpt-4o"),
-            "analytical_2": GeneralLlm(model="openai/gpt-o3"),
-            "parser": GeneralLlm(model="openai/gpt-o3")
-        }
-    )
-
-    if args.mode == "tournament":
-        logger.info("Running in tournament mode...")
-        tournament_ids = args.tournament_ids
-        all_questions = []
-        for tournament_id in tournament_ids:
+    bot = PreMortemAnalysisBot()
+    
+    logger.info(f"Running in tournament mode for IDs: {args.tournament_ids}")
+    all_questions = []
+    for tournament_id in args.tournament_ids:
+        try:
+            logger.info(f"Fetching questions for tournament '{tournament_id}'...")
             questions = MetaculusApi.get_questions_for_tournament(tournament_id)
+            logger.info(f"Found {len(questions)} questions in tournament '{tournament_id}'.")
             all_questions.extend(questions)
-        for question in all_questions:
-            research = asyncio.run(bot.run_research(question))
-            result = asyncio.run(bot.run_pre_mortem_analysis(question, research))
-            print("==== Pre-Mortem Analysis for Question ====")
-            print(f"Q: {question.question_text}\nURL: {question.page_url}")
-            print("=== Failure Narrative ===\n", result["failure_narrative"], "\n")
-            print("=== Success Narrative ===\n", result["success_narrative"], "\n")
-            print("=== Risks & Opportunities ===\n", result["risks_opps_markdown"], "\n")
-            print("=== Final Judgment ===\n", result["final_prediction"], "\n")
-    elif args.mode == "test_questions":
-        EXAMPLE_QUESTIONS = [
-            "https://www.metaculus.com/questions/578/human-extinction-by-2100/",
-            "https://www.metaculus.com/questions/14333/age-of-oldest-human-as-of-2100/",
-            "https://www.metaculus.com/questions/22427/number-of-new-leading-ai-labs/",
-        ]
-        for url in EXAMPLE_QUESTIONS:
-            question = MetaculusApi.get_question_by_url(url)
-            research = asyncio.run(bot.run_research(question))
-            result = asyncio.run(bot.run_pre_mortem_analysis(question, research))
-            print("==== Pre-Mortem Analysis for Question ====")
-            print(f"Q: {question.question_text}\nURL: {question.page_url}")
-            print("=== Failure Narrative ===\n", result["failure_narrative"], "\n")
-            print("=== Success Narrative ===\n", result["success_narrative"], "\n")
-            print("=== Risks & Opportunities ===\n", result["risks_opps_markdown"], "\n")
-            print("=== Final Judgment ===\n", result["final_prediction"], "\n")
+        except Exception as e:
+            logger.error(f"Failed to fetch questions for tournament '{tournament_id}': {e}")
+            
+    if not all_questions:
+        logger.warning("No questions found for the specified tournaments. Exiting.")
+        return
+
+    open_questions = [q for q in all_questions if q.is_open]
+    logger.info(f"Found a total of {len(open_questions)} open questions to analyze.")
+
+    tasks = [bot.run_single_question(question) for question in open_questions]
+    await asyncio.gather(*tasks)
+
+if __name__ == "__main__":
+    if not os.getenv("METACULUS_TOKEN"):
+        logger.warning("METACULUS_TOKEN is not set, which may limit question fetching.")
+    
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot execution interrupted by user.")
