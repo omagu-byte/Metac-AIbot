@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Pre-Mortem Analysis Bot (v7 - Final)
+Pre-Mortem Analysis Bot (v8 - Final Working Version)
 
 This script runs a multi-stage forecasting process on Metaculus questions.
-FIXED: Implements the required abstract methods and uses the correct `run_forecast_bot`
-entry point from the forecasting-tools library.
+FINAL FIX: Uses the correct `forecast_on_tournaments` entry point method.
 """
 import argparse
 import asyncio
@@ -17,9 +16,9 @@ import numpy as np
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-# FIX 1: Import the new 'run_forecast_bot' function
+# FIX 1: Removed the incorrect import of `run_forecast_bot`
 from forecasting_tools import (ForecastBot, MetaculusApi, MetaculusQuestion,
-                               clean_indents, run_forecast_bot)
+                               clean_indents)
 from newsapi import NewsApiClient
 
 # --- Setup and Configuration ---
@@ -214,9 +213,8 @@ async def main():
         return
 
     bot = PreMortemAnalysisBot()
-    # FIX 2: Use the new `run_forecast_bot` function and pass the bot instance to it.
-    # This is the new, correct way to start the bot's main loop.
-    await run_forecast_bot(bot, tournament_ids=args.tournament_ids)
+    # FIX 2: Call the correct `bot.forecast_on_tournaments` method.
+    await bot.forecast_on_tournaments(tournament_ids=args.tournament_ids)
 
 if __name__ == "__main__":
     try:
