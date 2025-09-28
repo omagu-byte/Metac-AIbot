@@ -1,12 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Pre-Mortem Analysis Bot (Final Version)
+Pre-Mortem Analysis Bot (v6 - Fixed for Abstract Class Error)
 
 This script runs a multi-stage forecasting process on Metaculus questions.
-It detects the question type and adapts its analysis for binary and numeric questions.
-This version is configured to use hypothetical future models (Claude 4, GPT-5).
-
-Default Tournament IDs: "minibench", "32813", "metaculus-cup-fall-2025"
+FIXED: Implements the required abstract methods from the forecasting-tools base class.
 """
 import argparse
 import asyncio
@@ -31,6 +28,7 @@ NEWSAPI_API_KEY = os.getenv("NEWSAPI_API_KEY")
 LINKUP_API_KEY = os.getenv("LINKUP_API_KEY")
 SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+METACULUS_TOKEN = os.getenv("METACULUS_TOKEN")
 
 # Basic Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -63,34 +61,26 @@ class OpenRouterLlm:
             logger.error(f"An exception occurred while calling OpenRouter for model {self.model}: {e}")
             return f"Exception during API call to {self.model}: {e}"
 
-# --- Research Clients ---
+# --- Research Clients & Collector ---
 class LinkupClient:
     """Client for the LinkUp Job Search API."""
-    def __init__(self, api_key):
-        self.api_key = api_key
-        self.url = "https://api.linkup.com/v1/jobs/search"
-
     async def search(self, query: str) -> str:
-        if not self.api_key: return "LinkUp API key not set."
-        headers = {"Authorization": f"Bearer {self.api_key}"}
+        if not LINKUP_API_KEY: return "LinkUp API key not set."
+        headers = {"Authorization": f"Bearer {LINKUP_API_KEY}"}
         params = {"q": query, "limit": 5}
         async with aiohttp.ClientSession() as session:
-            async with session.get(self.url, headers=headers, params=params) as resp:
+            async with session.get("https://api.linkup.com/v1/jobs/search", headers=headers, params=params) as resp:
                 if resp.status != 200: return f"[LinkUp error: {resp.status}]"
                 jobs = (await resp.json()).get("jobs", [])
                 return "\n".join([f"- {job.get('title','')} at {job.get('company','')} ({job.get('location','')})" for job in jobs])
 
 class SerpApiClient:
     """Client for SerpAPI."""
-    def __init__(self, api_key):
-        self.api_key = api_key
-        self.url = "https://serpapi.com/search"
-
     async def search(self, query: str) -> str:
-        if not self.api_key: return "SerpAPI key not set."
-        params = {"q": query, "api_key": self.api_key, "num": 5, "engine": "google"}
+        if not SERPAPI_API_KEY: return "SerpAPI key not set."
+        params = {"q": query, "api_key": SERPAPI_API_KEY, "num": 5, "engine": "google"}
         async with aiohttp.ClientSession() as session:
-            async with session.get(self.url, params=params) as resp:
+            async with session.get("https://serpapi.com/search", params=params) as resp:
                 if resp.status != 200: return f"[SerpAPI error: {resp.status}]"
                 items = (await resp.json()).get("organic_results", [])
                 return "\n".join([f"- {i.get('title','')}: {i.get('snippet','')}" for i in items])
@@ -106,8 +96,7 @@ class WebScraper:
             response.raise_for_status()
             soup = BeautifulSoup(response.text, 'html.parser')
             top_result = soup.find('a', class_='result__a')
-            if not top_result or 'href' not in top_result.attrs:
-                return "Web scraping found no clear top result."
+            if not top_result or 'href' not in top_result.attrs: return "Web scraping found no clear top result."
             page_url = top_result['href']
             logger.info(f"[Web Scraper] Scraping content from: {page_url}")
             page_response = requests.get(page_url, headers=headers, timeout=10)
@@ -119,71 +108,56 @@ class WebScraper:
         except Exception as e:
             return f"Web scraping failed: {e}"
 
-# --- Hybrid Research Collector ---
-async def gather_research(query: str) -> dict:
-    """Runs all research sources in parallel and returns a dictionary of results."""
-    loop = asyncio.get_running_loop()
-    
-    def query_newsapi():
-        if not NEWSAPI_API_KEY: return "NewsAPI key not set."
-        try:
-            newsapi = NewsApiClient(api_key=NEWSAPI_API_KEY)
-            response = newsapi.get_everything(q=query, language="en", sort_by="relevancy", page_size=5)
-            return "\n".join([f"- {a['title']}: {a.get('description', '')}" for a in response.get("articles", [])])
-        except Exception as e:
-            return f"NewsAPI failed: {e}"
-
-    tasks = {
-        "newsapi": loop.run_in_executor(None, query_newsapi),
-        "web_scrape": loop.run_in_executor(None, WebScraper().perform_web_scrape, query),
-        "linkup": LinkupClient(LINKUP_API_KEY).search(query),
-        "serpapi": SerpApiClient(SERPAPI_API_KEY).search(query),
-    }
-    
-    results = await asyncio.gather(*tasks.values(), return_exceptions=True)
-    return dict(zip(tasks.keys(), results))
-
 # --- Main Pre-Mortem Analysis Bot ---
 class PreMortemAnalysisBot(ForecastBot):
     """A forecasting bot that uses a pre-mortem analysis framework."""
     _max_concurrent_questions = 1
     _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
 
-    # --- MODEL CONFIGURATION ---
-    # Updated to use specified future/frontier models.
     MODEL_CONFIG = {
-        # Using a placeholder for the next-generation Claude model.
         "narrative_primary": "anthropic/claude-4-opus",
         "narrative_secondary": "mistralai/mistral-large-latest",
-        
-        # Using the specified GPT-5 model for all analytical tasks.
         "analytical_synthesis": "openai/gpt-5",
         "analytical_judgment": "openai/gpt-5",
     }
 
-    async def run_single_question(self, question: MetaculusQuestion):
-        """Orchestrates the analysis based on question type."""
-        async with self._concurrency_limiter:
-            logger.info(f"--- Starting Analysis for: '{question.question_text}' (Type: {question.question_type}) ---")
-            
-            research_results = await gather_research(question.question_text)
-            research_summary = (
-                f"--- RESEARCH SUMMARY ---\n"
-                f"NewsAPI:\n{research_results.get('newsapi','')}\n"
-                f"LinkUp (Job Postings):\n{research_results.get('linkup', '')}\n"
-                f"Web Scrape:\n{research_results.get('web_scrape','')}\n"
-                f"SerpAPI:\n{research_results.get('serpapi','')}\n"
-                f"--- END RESEARCH ---\n"
-            )
+    # FIX 1: Implement the required `run_research` method.
+    # This method is now required by the ForecastBot blueprint.
+    async def run_research(self, question: MetaculusQuestion) -> str:
+        """Gathers research from all sources."""
+        logger.info(f"[{question.id}] Running Research...")
+        loop = asyncio.get_running_loop()
+        
+        def query_newsapi():
+            if not NEWSAPI_API_KEY: return "NewsAPI key not set."
+            try:
+                newsapi = NewsApiClient(api_key=NEWSAPI_API_KEY)
+                response = newsapi.get_everything(q=question.question_text, language="en", sort_by="relevancy", page_size=5)
+                return "\n".join([f"- {a['title']}: {a.get('description', '')}" for a in response.get("articles", [])])
+            except Exception as e:
+                return f"NewsAPI failed: {e}"
 
-            if question.question_type == 'binary':
-                await self._run_binary_analysis(question, research_summary)
-            elif question.question_type == 'numeric':
-                await self._run_numeric_analysis(question, research_summary)
-            else:
-                logger.warning(f"Unsupported question type '{question.question_type}' for question {question.id}. Skipping.")
+        tasks = {
+            "newsapi": loop.run_in_executor(None, query_newsapi),
+            "web_scrape": loop.run_in_executor(None, WebScraper().perform_web_scrape, question.question_text),
+            "linkup": LinkupClient().search(question.question_text),
+            "serpapi": SerpApiClient().search(question.question_text),
+        }
+        
+        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+        research_results = dict(zip(tasks.keys(), results))
+        
+        return (
+            f"--- RESEARCH SUMMARY ---\n"
+            f"NewsAPI:\n{research_results.get('newsapi','')}\n\n"
+            f"LinkUp (Job Postings):\n{research_results.get('linkup', '')}\n\n"
+            f"Web Scrape:\n{research_results.get('web_scrape','')}\n\n"
+            f"SerpAPI:\n{research_results.get('serpapi','')}\n"
+            f"--- END RESEARCH ---\n"
+        )
 
-    async def _run_binary_analysis(self, question: MetaculusQuestion, research: str):
+    # FIX 2: Rename _run_binary_analysis to the required `_run_forecast_on_binary`.
+    async def _run_forecast_on_binary(self, question: MetaculusQuestion, research: str):
         """Runs the pre-mortem for a binary (Yes/No) question."""
         logger.info(f"[{question.id}] Running BINARY analysis...")
 
@@ -196,11 +170,14 @@ class PreMortemAnalysisBot(ForecastBot):
         synthesis = await OpenRouterLlm(self.MODEL_CONFIG["analytical_synthesis"]).invoke(synthesis_prompt)
 
         judgment_prompt = clean_indents(f"""You are a super forecaster. Question: {question.question_text}. Based on the synthesized risks and opportunities below, provide a final probability that the question resolves YES. Weigh the risks against the opportunities in your rationale. Risks & Opportunities:\n{synthesis}\n\nFormat your output ONLY as:\nProbability: XX%\nRationale: <Your detailed reasoning>""")
+        
+        # FIX 4: Corrected typo from MODEL_DOCS to MODEL_CONFIG
         prediction = await OpenRouterLlm(self.MODEL_CONFIG["analytical_judgment"]).invoke(judgment_prompt)
         
         self.print_analysis_results(question, narratives, synthesis, prediction, ("Failure Narrative", "Success Narrative"))
 
-    async def _run_numeric_analysis(self, question: MetaculusQuestion, research: str):
+    # FIX 3: Rename _run_numeric_analysis to the required `_run_forecast_on_numeric`.
+    async def _run_forecast_on_numeric(self, question: MetaculusQuestion, research: str):
         """Runs the pre-mortem for a numeric question."""
         logger.info(f"[{question.id}] Running NUMERIC analysis...")
 
@@ -217,12 +194,21 @@ class PreMortemAnalysisBot(ForecastBot):
 
         self.print_analysis_results(question, narratives, synthesis, prediction, ("Low Outcome Narrative", "High Outcome Narrative"))
 
+    # FIX 5: Add the required (but unused) `_run_forecast_on_multiple_choice` method.
+    async def _run_forecast_on_multiple_choice(self, question: MetaculusQuestion, research: str):
+        """Placeholder for multiple choice questions, as required by the abstract class."""
+        logger.warning(f"Multiple choice question type not implemented. Skipping question: {question.id}")
+        # This method is required by the blueprint but we don't need it, so we do nothing.
+        pass
+
+    # Helper method, no changes needed
     async def _generate_narratives(self, model1, model2, prompt1, prompt2) -> tuple[str, str]:
         """Generates two narratives in parallel."""
         tasks = [OpenRouterLlm(model1).invoke(prompt1), OpenRouterLlm(model2).invoke(prompt2)]
         results = await asyncio.gather(*tasks)
         return results[0], results[1]
 
+    # Helper method, no changes needed
     def print_analysis_results(self, question, narratives, synthesis, prediction, narrative_titles):
         """Formats and prints the final analysis."""
         print("\n" + "="*80)
@@ -238,44 +224,24 @@ class PreMortemAnalysisBot(ForecastBot):
 async def main():
     """Main execution function."""
     parser = argparse.ArgumentParser(description="Run Pre-Mortem Analysis Bot on Metaculus questions.")
-    parser.add_argument(
-        "--tournament-ids", 
-        nargs='+', 
-        type=str, 
-        default=["minibench", "32813", "metaculus-cup-fall-2025"], 
-        help="Space-separated Metaculus tournament IDs."
-    )
+    parser.add_argument("--tournament-ids", nargs='+', type=str, default=["minibench", "32813", "metaculus-cup-fall-2025"], help="Space-separated Metaculus tournament IDs.")
     args = parser.parse_args()
-
-    bot = PreMortemAnalysisBot()
     
-    logger.info(f"Running in tournament mode for IDs: {args.tournament_ids}")
-    all_questions = []
-    for tournament_id in args.tournament_ids:
-        try:
-            logger.info(f"Fetching questions for tournament '{tournament_id}'...")
-            questions = MetaculusApi.get_questions_for_tournament(tournament_id)
-            logger.info(f"Found {len(questions)} questions in tournament '{tournament_id}'.")
-            all_questions.extend(questions)
-        except Exception as e:
-            logger.error(f"Failed to fetch questions for tournament '{tournament_id}': {e}")
-            
-    if not all_questions:
-        logger.warning("No questions found for the specified tournaments. Exiting.")
+    if not METACULUS_TOKEN:
+        logger.error("METACULUS_TOKEN is not set. The bot cannot fetch questions.")
         return
 
-    open_questions = [q for q in all_questions if q.is_open]
-    logger.info(f"Found a total of {len(open_questions)} open questions to analyze.")
-
-    tasks = [bot.run_single_question(question) for question in open_questions]
-    await asyncio.gather(*tasks)
+    # The ForecastBot's `run` method handles the main loop now.
+    bot = PreMortemAnalysisBot()
+    await bot.run(tournament_ids=args.tournament_ids)
 
 if __name__ == "__main__":
-    if not os.getenv("METACULUS_TOKEN"):
-        logger.warning("METACULUS_TOKEN is not set, which may limit question fetching.")
-    
     try:
+        # nest_asyncio allows the bot to run within environments that already have an event loop (like Jupyter/Codespaces)
+        import nest_asyncio
+        nest_asyncio.apply()
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot execution interrupted by user.")
+
 
