@@ -1,0 +1,69 @@
+# This workflow automates the execution of the Pre-Mortem Analysis Bot.
+name: Pre-Mortem Analysis Bot
+
+on:
+  # Allows you to run this workflow manually from the GitHub Actions tab.
+  workflow_dispatch:
+
+  # Runs the workflow on a schedule.
+  schedule:
+    # Runs every 20 minutes. The bot's underlying library (forecasting-tools)
+    # should handle skipping questions that have already been forecasted.
+    - cron: "*/20 * * * *"
+
+# Ensures that only one instance of this workflow runs at a time.
+# If a new run is triggered while one is in progress, it will be queued.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  forecast_job:
+    # The type of machine to run the job on. 'ubuntu-latest' is standard and recommended.
+    runs-on: ubuntu-latest
+    steps:
+      # Step 1: Checks out your repository under $GITHUB_WORKSPACE, so your job can access it.
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # Step 2: Sets up the specified version of Python.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Step 3: Installs Poetry, which is used for managing project dependencies.
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          installer-parallel: true
+
+      # Step 4: Caches the installed dependencies to speed up subsequent workflow runs.
+      - name: Load cached venv
+        id: cached-poetry-dependencies
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('**/poetry.lock') }}
+
+      # Step 5: Installs dependencies using Poetry. This step is skipped if the cache was successfully restored.
+      - name: Install dependencies
+        if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
+        run: poetry install --no-interaction --no-root
+
+      # Step 6: Executes the main Python script for the bot.
+      - name: Run Pre-Mortem Bot
+        # IMPORTANT: Make sure your main Python script is named 'main.py' or update this line.
+        run: poetry run python Main.py
+        env:
+          # This section maps your GitHub Secrets to the environment variables
+          # that the Python script expects.
+          # Store these secrets in your GitHub repository under:
+          # Settings > Secrets and variables > Actions > Repository secrets
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          NEWSAPI_API_KEY: ${{ secrets.NEWSAPI_API_KEY }}
+          LINKUP_API_KEY: ${{ secrets.LINKUP_API_KEY }}
+          SERPAPI_API_KEY: ${{ secrets.SERPAPI_API_KEY }} # Corrected to match the Python script's os.getenv call
