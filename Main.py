@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Pre-Mortem Analysis Bot (v6 - Fixed for Abstract Class Error)
+Pre-Mortem Analysis Bot (v7 - Final)
 
 This script runs a multi-stage forecasting process on Metaculus questions.
-FIXED: Implements the required abstract methods from the forecasting-tools base class.
+FIXED: Implements the required abstract methods and uses the correct `run_forecast_bot`
+entry point from the forecasting-tools library.
 """
 import argparse
 import asyncio
@@ -16,8 +17,9 @@ import numpy as np
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from forecasting_tools import (ForecastBot, GeneralLlm, MetaculusApi,
-                               MetaculusQuestion, clean_indents)
+# FIX 1: Import the new 'run_forecast_bot' function
+from forecasting_tools import (ForecastBot, MetaculusApi, MetaculusQuestion,
+                               clean_indents, run_forecast_bot)
 from newsapi import NewsApiClient
 
 # --- Setup and Configuration ---
@@ -121,8 +123,6 @@ class PreMortemAnalysisBot(ForecastBot):
         "analytical_judgment": "openai/gpt-5",
     }
 
-    # FIX 1: Implement the required `run_research` method.
-    # This method is now required by the ForecastBot blueprint.
     async def run_research(self, question: MetaculusQuestion) -> str:
         """Gathers research from all sources."""
         logger.info(f"[{question.id}] Running Research...")
@@ -156,59 +156,41 @@ class PreMortemAnalysisBot(ForecastBot):
             f"--- END RESEARCH ---\n"
         )
 
-    # FIX 2: Rename _run_binary_analysis to the required `_run_forecast_on_binary`.
     async def _run_forecast_on_binary(self, question: MetaculusQuestion, research: str):
         """Runs the pre-mortem for a binary (Yes/No) question."""
         logger.info(f"[{question.id}] Running BINARY analysis...")
-
         fail_prompt = clean_indents(f"""It is one day after this question's resolution date ({question.resolution_date}). The outcome of "{question.question_text}" was a surprising NO. Write a plausible news article explaining what went wrong. Use the provided research to ground your narrative. Research:\n{research}""")
         success_prompt = clean_indents(f"""It is one day after this question's resolution date ({question.resolution_date}). The outcome of "{question.question_text}" was a surprising YES. Write a plausible news article explaining what went right. Use the provided research to ground your narrative. Research:\n{research}""")
-        
         narratives = await self._generate_narratives(self.MODEL_CONFIG["narrative_primary"], self.MODEL_CONFIG["narrative_secondary"], fail_prompt, success_prompt)
-        
         synthesis_prompt = clean_indents(f"""Read the two narratives. Extract key insights into a Markdown table with two columns: 'Identified Risks (drives NO)' and 'Identified Opportunities (drives YES)'. Failure Narrative:\n{narratives[0]}\nSuccess Narrative:\n{narratives[1]}""")
         synthesis = await OpenRouterLlm(self.MODEL_CONFIG["analytical_synthesis"]).invoke(synthesis_prompt)
-
         judgment_prompt = clean_indents(f"""You are a super forecaster. Question: {question.question_text}. Based on the synthesized risks and opportunities below, provide a final probability that the question resolves YES. Weigh the risks against the opportunities in your rationale. Risks & Opportunities:\n{synthesis}\n\nFormat your output ONLY as:\nProbability: XX%\nRationale: <Your detailed reasoning>""")
-        
-        # FIX 4: Corrected typo from MODEL_DOCS to MODEL_CONFIG
         prediction = await OpenRouterLlm(self.MODEL_CONFIG["analytical_judgment"]).invoke(judgment_prompt)
-        
         self.print_analysis_results(question, narratives, synthesis, prediction, ("Failure Narrative", "Success Narrative"))
 
-    # FIX 3: Rename _run_numeric_analysis to the required `_run_forecast_on_numeric`.
     async def _run_forecast_on_numeric(self, question: MetaculusQuestion, research: str):
         """Runs the pre-mortem for a numeric question."""
         logger.info(f"[{question.id}] Running NUMERIC analysis...")
-
         low_prompt = clean_indents(f"""It is one day after the resolution date. The final number for "{question.question_text}" was surprisingly LOW, far below the median expectation. Write a plausible news article explaining the constraints and factors that suppressed the outcome. Use the provided research. Research:\n{research}""")
         high_prompt = clean_indents(f"""It is one day after the resolution date. The final number for "{question.question_text}" was surprisingly HIGH, far exceeding the median expectation. Write a plausible news article explaining the catalysts and breakthroughs that drove the outcome. Use the provided research. Research:\n{research}""")
-
         narratives = await self._generate_narratives(self.MODEL_CONFIG["narrative_primary"], self.MODEL_CONFIG["narrative_secondary"], low_prompt, high_prompt)
-
         synthesis_prompt = clean_indents(f"""Read the two narratives. Extract key drivers into a Markdown table with two columns: 'Downward Drivers (pushes number lower)' and 'Upward Drivers (pushes number higher)'. Low Outcome Narrative:\n{narratives[0]}\nHigh Outcome Narrative:\n{narratives[1]}""")
         synthesis = await OpenRouterLlm(self.MODEL_CONFIG["analytical_synthesis"]).invoke(synthesis_prompt)
-
         judgment_prompt = clean_indents(f"""You are a super forecaster. Question: {question.question_text}. Based on the synthesized drivers below, provide a numeric forecast. Weigh the upward vs. downward drivers in your rationale. Downward & Upward Drivers:\n{synthesis}\n\nFormat your output ONLY as:\nPoint Forecast: [Your single best numeric estimate]\nConfidence Interval (90%): [Lower bound] to [Upper bound]\nRationale: <Your detailed reasoning>""")
         prediction = await OpenRouterLlm(self.MODEL_CONFIG["analytical_judgment"]).invoke(judgment_prompt)
-
         self.print_analysis_results(question, narratives, synthesis, prediction, ("Low Outcome Narrative", "High Outcome Narrative"))
 
-    # FIX 5: Add the required (but unused) `_run_forecast_on_multiple_choice` method.
     async def _run_forecast_on_multiple_choice(self, question: MetaculusQuestion, research: str):
         """Placeholder for multiple choice questions, as required by the abstract class."""
         logger.warning(f"Multiple choice question type not implemented. Skipping question: {question.id}")
-        # This method is required by the blueprint but we don't need it, so we do nothing.
         pass
 
-    # Helper method, no changes needed
     async def _generate_narratives(self, model1, model2, prompt1, prompt2) -> tuple[str, str]:
         """Generates two narratives in parallel."""
         tasks = [OpenRouterLlm(model1).invoke(prompt1), OpenRouterLlm(model2).invoke(prompt2)]
         results = await asyncio.gather(*tasks)
         return results[0], results[1]
 
-    # Helper method, no changes needed
     def print_analysis_results(self, question, narratives, synthesis, prediction, narrative_titles):
         """Formats and prints the final analysis."""
         print("\n" + "="*80)
@@ -231,13 +213,13 @@ async def main():
         logger.error("METACULUS_TOKEN is not set. The bot cannot fetch questions.")
         return
 
-    # The ForecastBot's `run` method handles the main loop now.
     bot = PreMortemAnalysisBot()
-    await bot.run(tournament_ids=args.tournament_ids)
+    # FIX 2: Use the new `run_forecast_bot` function and pass the bot instance to it.
+    # This is the new, correct way to start the bot's main loop.
+    await run_forecast_bot(bot, tournament_ids=args.tournament_ids)
 
 if __name__ == "__main__":
     try:
-        # nest_asyncio allows the bot to run within environments that already have an event loop (like Jupyter/Codespaces)
         import nest_asyncio
         nest_asyncio.apply()
         asyncio.run(main())
