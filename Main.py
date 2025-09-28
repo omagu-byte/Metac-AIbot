@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-Pre-Mortem Analysis Bot (v5 - GPT-5 Integration)
+Pre-Mortem Analysis Bot (Final Version)
 
 This script runs a multi-stage forecasting process on Metaculus questions.
-It now detects the question type and adapts its analysis:
-- For BINARY questions: Uses a "Failure vs. Success" framework.
-- For NUMERIC questions: Uses a "Surprisingly Low vs. Surprisingly High" framework.
+It detects the question type and adapts its analysis for binary and numeric questions.
+This version is configured to use hypothetical future models (Claude 4, GPT-5).
 
-This version is updated to use GPT-5 for all analytical tasks.
+Default Tournament IDs: "minibench", "32813", "metaculus-cup-fall-2025"
 """
 import argparse
 import asyncio
@@ -35,7 +34,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 # Basic Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-logger = logging.getLogger("PreMortemAnalysisBotV5")
+logger = logging.getLogger("PreMortemAnalysisBot")
 
 # --- LLM Client (using OpenRouter) ---
 class OpenRouterLlm:
@@ -151,10 +150,10 @@ class PreMortemAnalysisBot(ForecastBot):
     _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
 
     # --- MODEL CONFIGURATION ---
-    # Updated to use specified frontier models.
+    # Updated to use specified future/frontier models.
     MODEL_CONFIG = {
-        # Using the most powerful Claude model available for primary narrative generation.
-        "narrative_primary": "anthropic/claude-3-opus-20240229",
+        # Using a placeholder for the next-generation Claude model.
+        "narrative_primary": "anthropic/claude-4-opus",
         "narrative_secondary": "mistralai/mistral-large-latest",
         
         # Using the specified GPT-5 model for all analytical tasks.
@@ -239,7 +238,13 @@ class PreMortemAnalysisBot(ForecastBot):
 async def main():
     """Main execution function."""
     parser = argparse.ArgumentParser(description="Run Pre-Mortem Analysis Bot on Metaculus questions.")
-    parser.add_argument("--tournament-ids", nargs='+', type=str, default=["minibench", "32813", "metaculus-cup-fall-2025"], help="Space-separated Metaculus tournament IDs.")
+    parser.add_argument(
+        "--tournament-ids", 
+        nargs='+', 
+        type=str, 
+        default=["minibench", "32813", "metaculus-cup-fall-2025"], 
+        help="Space-separated Metaculus tournament IDs."
+    )
     args = parser.parse_args()
 
     bot = PreMortemAnalysisBot()
@@ -273,3 +278,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot execution interrupted by user.")
+
