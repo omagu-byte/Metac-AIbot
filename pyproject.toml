@@ -1,1 +1,26 @@
+[tool.poetry]
+name = "pre-mortem-analysis-bot"
+version = "1.0.0"
+description = "A multi-model forecasting bot using a pre-mortem analysis framework on Metaculus questions."
+authors = ["Your Name <you@example.com>"]
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.11"
+forecasting-tools = "^0.2.54"
+python-dotenv = "^1.0.1"
+requests = "^2.32.3"
+newsapi-python = "^0.2.7"
+numpy = "^1.26.4" # Pinned to a stable version, but can be updated
+aiohttp = "^3.9.5"
+beautifulsoup4 = "^4.12.3"
+
+
+[tool.poetry.group.dev.dependencies]
+ipykernel = "^6.29.5"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
 
