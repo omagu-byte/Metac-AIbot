@@ -359,8 +359,19 @@ class PreMortemOpenRouterGPT5Bot(ForecastBot):
 
     async def _run_forecast_on_multiple_choice(self, question: MultipleChoiceQuestion, research: str):
         logger.info(f"[{question.id}] Multiple choice analysis")
-        options = getattr(question, "options", []) or []
-        option_lines = "\n".join([f"{i}: {opt}" for i, opt in enumerate(options)])
+        
+        # More robustly extract options, checking for different attribute names and types.
+        options = getattr(question, "options", None) or getattr(question, "choices", None)
+        
+        if isinstance(options, dict):
+            # Handle dictionary format, e.g., {0: "Option A", 1: "Option B"}
+            option_lines = "\n".join([f"{i}: {v}" for i, v in options.items()])
+        elif isinstance(options, (list, tuple)):
+            # Handle list/tuple format, e.g., ["Option A", "Option B"]
+            option_lines = "\n".join([f"{i}: {opt}" for i, opt in enumerate(options)])
+        else:
+            logger.warning(f"[{question.id}] Could not extract structured options. Will proceed without them.")
+            option_lines = "Options not available in structured format. Analyze based on question text."
         
         prompt = clean_indents(f"""You are a forecasting assistant. Here is the question and the options:
 Question: {question.question_text}
@@ -448,4 +459,5 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Execution interrupted by user.")
+
 
