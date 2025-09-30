@@ -221,10 +221,10 @@ class PreMortemOpenRouterGPT5Bot(ForecastBot):
     Pre-mortem bot that uses OpenRouter by default and includes multiple research sources.
     """
     MODEL_CONFIG = {
-        "narrative_primary": os.getenv("NARRATIVE_PRIMARY_MODEL", "openrouter/auto"),
-        "narrative_secondary": os.getenv("NARRATIVE_SECONDARY_MODEL", "openrouter/auto"),
+        "narrative_primary": os.getenv("NARRATIVE_PRIMARY_MODEL", "openrouter/gpt-o3"),
+        "narrative_secondary": os.getenv("NARRATIVE_SECONDARY_MODEL", "openrouter/gpt-5"),
         "analytical_synthesis": os.getenv("ANALYTICAL_SYNTHESIS_MODEL", "openai/gpt-4o"),
-        "analytical_judgment": os.getenv("ANALYTICAL_JUDGMENT_MODEL", "openai/gpt-4o"),
+        "analytical_judgment": os.getenv("ANALYTICAL_JUDGMENT_MODEL", "openrouter/gpt-5"),
     }
 
     _max_concurrent_questions = 1
@@ -406,12 +406,26 @@ Example: [{{"index": 0, "probability": 20, "rationale":"..."}}, {{"index": 1, "p
 # Entrypoint
 # -----------------------
 async def main():
-    parser = argparse.ArgumentParser(description="Run PreMortem OpenRouter+GPT Bot on Metaculus tournaments.")
-    parser.add_argument("--tournament-ids", nargs="+", default=[str(MetaculusApi.CURRENT_MINIBENCH_ID)],
-                        help=f"Metaculus tournament IDs (default: current minibench {MetaculusApi.CURRENT_MINIBENCH_ID})")
-    parser.add_argument("--models", nargs=4, metavar=('NARR_PRIMARY', 'NARR_SECONDARY', 'SYNTHESIS', 'JUDGMENT'),
-                        help="Override models for the four stages.")
+    parser = argparse.ArgumentParser(
+        description="Run PreMortem OpenRouter+GPT Bot on Metaculus tournaments."
+    )
+    parser.add_argument(
+        "--tournament-ids",
+        nargs="+",
+        default=[str(32813), str(MetaculusApi.CURRENT_MINIBENCH_ID)],
+        help=(
+            "Metaculus tournament IDs "
+            f"(default: 32813 and current minibench {MetaculusApi.CURRENT_MINIBENCH_ID})"
+        ),
+    )
+    parser.add_argument(
+        "--models",
+        nargs=4,
+        metavar=("NARR_PRIMARY", "NARR_SECONDARY", "SYNTHESIS", "JUDGMENT"),
+        help="Override models for the four stages.",
+    )
     args = parser.parse_args()
+
 
     if args.models:
         PreMortemOpenRouterGPT5Bot.MODEL_CONFIG.update({
