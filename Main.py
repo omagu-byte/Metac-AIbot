@@ -72,11 +72,11 @@ class PreMortemOpenRouterBot(ForecastBot):
         self.newsapi_key = newsapi_key
         self.linkup_api_key = linkup_api_key
         self.models = {
-            "narrative_primary": "openrouter/gpt-o3",
+            "narrative_primary": "openrouter/gpt-5-mini",
             "judgment_models": [
                 "openrouter/gpt-5",
                 "openrouter/gpt-o3",
-                "openrouter/anthropic/claude-3-opus-20240229"
+                "openrouter/gpt-5-nano"
             ]
         }
 
