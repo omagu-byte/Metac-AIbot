@@ -1,219 +1,322 @@
+# main.py
+# Final Conservative Forecasting Bot — Tournament-Only, OpenRouter-Only
+
 import argparse
 import asyncio
 import logging
 import os
-import aiohttp
-import requests
-import json
-import statistics
 from datetime import datetime
-from dotenv import load_dotenv
+from typing import Literal
 
+import numpy as np
+import requests
 from forecasting_tools import (
+    BinaryQuestion,
     ForecastBot,
+    GeneralLlm,
     MetaculusApi,
     MetaculusQuestion,
     MultipleChoiceQuestion,
-    BinaryQuestion,
+    NumericDistribution,
     NumericQuestion,
+    Percentile,
+    BinaryPrediction,
+    PredictedOptionList,
+    ReasonedPrediction,
     clean_indents,
+    structure_output,
 )
 
-# Load environment variables
-load_dotenv()
-
-# Configure logging
-logger = logging.getLogger("PreMortemOpenRouterBot")
+# -----------------------------
+# Environment & Logging
+# -----------------------------
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
+logger = logging.getLogger("ConservativeHybridBot")
 
-# -------------------------------------------------------------------
-# OpenRouter-only LLM client
-# -------------------------------------------------------------------
-class OpenRouterLlm:
-    def __init__(self, model: str, api_key: str):
-        if not api_key:
-            raise ValueError("OPENROUTER_API_KEY is not set.")
-        self.model = model
-        self.api_key = api_key
-        self.url = "https://openrouter.ai/api/v1/chat/completions"
 
-    async def invoke(self, prompt: str, temperature: float = 0.7, max_tokens: int = 1500) -> str:
-        payload = {
-            "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": temperature,
-            "max_tokens": max_tokens,
+class ConservativeHybridBot(ForecastBot):
+    """
+    Tournament-only bot using:
+    - Research: SerpApi + NewsAPI + Linkup + Perplexity (deep)
+    - Models: gpt-5 (default/summarizer), gpt-4.1-mini (parser), claude-sonnet-4.5, qwen3
+    - Committee: 4 forecasters → median
+    - Compliance: structure_output + NumericDistribution.from_question()
+    """
+
+    _max_concurrent_questions = 1
+    _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
+
+    def _llm_config_defaults(self) -> dict[str, str]:
+        return {
+            "default": "openrouter/openai/gpt-5",
+            "parser": "openrouter/openai/gpt-4.1-mini",
+            "summarizer": "openrouter/openai/gpt-5",
+            "researcher": "openrouter/perplexity/sonar-deep-research",
         }
-        headers = {"Authorization": f"Bearer {self.api_key}"}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.serpapi_key = os.getenv("SERP_API_KEY")
+        self.newsapi_key = os.getenv("NEWS_API_KEY")
+        self.linkup_api_key = os.getenv("LINKUP_API_KEY")
+        if not all([self.serpapi_key, self.newsapi_key, self.linkup_api_key]):
+            raise EnvironmentError("SERP_API_KEY, NEWS_API_KEY, and LINKUP_API_KEY must be set.")
+
+    # -----------------------------
+    # Multi-Source Research (SerpApi + NewsAPI + Linkup + Perplexity)
+    # -----------------------------
+    def call_serpapi(self, query: str) -> str:
+        if not self.serpapi_key: return ""
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(self.url, headers=headers, json=payload, timeout=240) as resp:
-                    txt = await resp.text()
-                    if resp.status != 200:
-                        logger.error(f"[OpenRouter {self.model}] status {resp.status}: {txt[:400]}")
-                        return f"[error {resp.status}] {txt[:200]}"
-                    data = await resp.json()
-                    return data.get("choices", [{}])[0].get("message", {}).get("content", "")
-        except Exception as e:
-            logger.exception(f"OpenRouter invoke error for {self.model}")
-            return f"[exception] {e}"
-
-# -------------------------------------------------------------------
-# Bot implementation
-# -------------------------------------------------------------------
-class PreMortemOpenRouterBot(ForecastBot):
-    def __init__(self, api_key: str, serpapi_key: str, newsapi_key: str, linkup_api_key: str, **kwargs):
-        super().__init__(**kwargs)
-        self.api_key = api_key
-        self.serpapi_key = serpapi_key
-        self.newsapi_key = newsapi_key
-        self.linkup_api_key = linkup_api_key
-        self.models = {
-            "narrative_primary": "openrouter/gpt-5-mini",
-            "judgment_models": [
-                "openrouter/gpt-5",
-                "openrouter/gpt-o3",
-                "openrouter/gpt-5-nano"
-            ]
-        }
-
-    def llm_factory(self, model: str) -> OpenRouterLlm:
-        return OpenRouterLlm(model, self.api_key)
-
-    def gather_research(self, query: str) -> str:
-        serp_params = {
-            "api_key": self.serpapi_key,
-            "engine": "google",
-            "q": query,
-            "tbm": "nws"
-        }
-        news_params = {
-            "apiKey": self.newsapi_key,
-            "q": query,
-            "pageSize": 10
-        }
-
-        serp_results = requests.get("https://serpapi.com/search", params=serp_params).json()
-        news_results = requests.get("https://newsapi.org/v2/everything", params=news_params).json()
-
-        texts = []
-        for item in serp_results.get("news_results", []):
-            texts.append(item.get("title", "") + ": " + item.get("snippet", ""))
-        for article in news_results.get("articles", []):
-            texts.append(article.get("title", "") + ": " + article.get("description", ""))
-
-        return "\n".join(texts)
-
-    async def forecast_question(self, question: MetaculusQuestion) -> str:
-        logger.info(f"--- Forecasting question {question.id}: {question.title} ---")
-
-        # Step 1: Gather research
-        research_text = self.gather_research(question.title)
-        logger.info(f"[Research] {question.id}:\n{research_text[:500]}...\n")
-
-        # Step 2: Generate narrative
-        prompt_narrative = f"Using the following research, write a compelling narrative for this forecasting question:\n\nQuestion: {question.title}\nURL: {question.url}\n\nResearch:\n{research_text}"
-        narrative_llm = self.llm_factory(self.models["narrative_primary"])
-        narrative = await narrative_llm.invoke(prompt_narrative, temperature=0.6)
-        logger.info(f"[Narrative] {question.id}:\n{narrative}\n")
-
-        # Step 3: Forecast using ensemble of models
-        prompt_forecast = (
-            f"Based on the narrative and research, provide a reasoned forecast.\n\n"
-            f"Narrative:\n{narrative}\n\n"
-            f"Research:\n{research_text}\n\n"
-            f"Question:\n{question.title}\nType: {question.type}\nURL: {question.url}\n\n"
-            f"Respond with a single numeric probability (0–100) or best guess value depending on question type."
-        )
-
-        forecasts = []
-        raw_outputs = {}
-        for model_name in self.models["judgment_models"]:
-            llm = self.llm_factory(model_name)
-            response = await llm.invoke(prompt_forecast, temperature=0.4)
-            logger.info(f"[{model_name} Forecast] {question.id}:\n{response}\n")
-            raw_outputs[model_name] = response
-            try:
-                value = float(response.strip().split()[0].replace("%", ""))
-                forecasts.append(value)
-            except Exception:
-                logger.warning(f"Could not parse forecast from {model_name}: {response}")
-
-        if forecasts:
-            median_forecast = statistics.median(forecasts)
-            disagreement = max(forecasts) - min(forecasts)
-            logger.info(f"[Median Forecast] {question.id}: {median_forecast}")
-            logger.info(f"[Model Disagreement] {question.id}: {disagreement:.2f}")
-
-            # Step 4: Save to file
-            output = {
-                "question_id": question.id,
-                "title": question.title,
-                "url": question.url,
-                "type": question.type,
-                "narrative": narrative,
-                "research": research_text,
-                "forecasts": raw_outputs,
-                "parsed_values": forecasts,
-                "median_forecast": median_forecast,
-                "disagreement": disagreement,
-                "timestamp": datetime.utcnow().isoformat()
-            }
-            os.makedirs("forecasts", exist_ok=True)
-            with open(f"forecasts/{question.id}.json", "w", encoding="utf-8") as f:
-                json.dump(output, f, indent=2)
-
-            # Step 5: Post comment to Metaculus
-            comment_text = (
-                f"Forecast generated by ensemble of GPT models via OpenRouter.\n"
-                f"Median forecast: {median_forecast:.2f}\n"
-                f"Model disagreement: {disagreement:.2f}\n\n"
-                f"Narrative:\n{narrative[:500]}..."
+            response = requests.get(
+                "https://serpapi.com/search.json",
+                params={"q": query, "api_key": self.serpapi_key, "tbm": "nws"},
+                timeout=10
             )
-            await self.metaculus_api.post_comment(question.id, comment_text)
+            response.raise_for_status()
+            data = response.json()
+            return "\n".join([
+                f"- {item.get('title', '')}: {item.get('snippet', '')}"
+                for item in data.get("news_results", [])
+            ])
+        except Exception as e:
+            return f"SerpApi failed: {e}"
 
-            return f"Median forecast: {median_forecast:.2f} (disagreement: {disagreement:.2f})"
+    def call_newsapi(self, query: str) -> str:
+        if not self.newsapi_key: return ""
+        try:
+            response = requests.get(
+                "https://newsapi.org/v2/everything",
+                params={"q": query, "apiKey": self.newsapi_key, "pageSize": 5},
+                timeout=10
+            )
+            response.raise_for_status()
+            data = response.json()
+            return "\n".join([
+                f"- {a.get('title', '')}: {a.get('description', '')}"
+                for a in data.get("articles", [])
+            ])
+        except Exception as e:
+            return f"NewsAPI failed: {e}"
+
+    def call_linkup(self, query: str) -> str:
+        if not self.linkup_api_key: return ""
+        try:
+            response = requests.post(
+                "https://api.linkup.so/v1/search",
+                headers={"Authorization": f"Bearer {self.linkup_api_key}"},
+                json={"query": query},
+                timeout=10
+            )
+            response.raise_for_status()
+            data = response.json()
+            return "\n".join([
+                f"- {r.get('title', '')}: {r.get('snippet', '')}"
+                for r in data.get("results", [])
+            ])
+        except Exception as e:
+            return f"Linkup failed: {e}"
+
+    async def run_research(self, question: MetaculusQuestion) -> str:
+        async with self._concurrency_limiter:
+            loop = asyncio.get_running_loop()
+            tasks = {
+                "serpapi": loop.run_in_executor(None, self.call_serpapi, question.question_text),
+                "newsapi": loop.run_in_executor(None, self.call_newsapi, question.question_text),
+                "linkup": loop.run_in_executor(None, self.call_linkup, question.question_text),
+                "perplexity": self.get_llm("researcher", "llm").invoke(question.question_text)
+            }
+            results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+            raw_research = ""
+            for i, result in enumerate(results):
+                raw_research += f"--- SOURCE {list(tasks.keys())[i].upper()} ---\n{result}\n\n"
+            return raw_research
+
+    # -----------------------------
+    # Conservative Forecasting with 4-Model Committee
+    # -----------------------------
+    async def _generate_narrative(self, question: MetaculusQuestion, research: str) -> str:
+        prompt = clean_indents(f"""
+        You are a senior analyst. Write a concise, evidence-based narrative that explains
+        key drivers, uncertainties, and plausible scenarios for this question.
+
+        Question: {question.question_text}
+        Research: {research}
+        Today: {datetime.now().strftime("%Y-%m-%d")}
+        """)
+        return await self.get_llm("summarizer", "llm").invoke(prompt)
+
+    async def _single_forecast(self, question, narrative: str, research: str, model_override: str = None):
+        if model_override:
+            self._llms["default"] = GeneralLlm(model=model_override)
+
+        if isinstance(question, BinaryQuestion):
+            prompt = clean_indents(f"""
+            Conservative professional forecaster.
+
+            Question: {question.question_text}
+            Background: {question.background_info}
+            Resolution: {question.resolution_criteria}
+            Fine print: {question.fine_print}
+            Narrative: {narrative}
+            Research: {research}
+            Today: {datetime.now().strftime("%Y-%m-%d")}
+
+            Favor status quo. Avoid overconfidence.
+
+            End with: "Probability: ZZ%"
+            """)
+            reasoning = await self.get_llm("default", "llm").invoke(prompt)
+            pred: BinaryPrediction = await structure_output(reasoning, BinaryPrediction, model=self.get_llm("parser", "llm"))
+            result = max(0.01, min(0.99, pred.prediction_in_decimal)
+
+        elif isinstance(question, MultipleChoiceQuestion):
+            prompt = clean_indents(f"""
+            Question: {question.question_text}
+            Options: {question.options}
+            Narrative: {narrative}
+            Research: {research}
+            Today: {datetime.now().strftime("%Y-%m-%d")}
+
+            Assign probabilities. No 0% unless logically impossible.
+
+            End with probabilities for each option in order.
+            """)
+            reasoning = await self.get_llm("default", "llm").invoke(prompt)
+            result = await structure_output(
+                reasoning, PredictedOptionList, model=self.get_llm("parser", "llm"),
+                additional_instructions=f"Options must be exactly: {question.options}"
+            )
+
+        elif isinstance(question, NumericQuestion):
+            lower_msg = f"Lower bound: {'open' if question.open_lower_bound else 'closed'} at {question.lower_bound or question.nominal_lower_bound}"
+            upper_msg = f"Upper bound: {'open' if question.open_upper_bound else 'closed'} at {question.upper_bound or question.nominal_upper_bound}"
+            prompt = clean_indents(f"""
+            Conservative forecaster. Set wide 90/10 intervals.
+
+            Question: {question.question_text}
+            Units: {question.unit_of_measure or 'Infer'}
+            Narrative: {narrative}
+            Research: {research}
+            {lower_msg}
+            {upper_msg}
+            Today: {datetime.now().strftime("%Y-%m-%d")}
+
+            Provide percentiles: 10, 20, 40, 60, 80, 90.
+            """)
+            reasoning = await self.get_llm("default", "llm").invoke(prompt)
+            percentile_list: list[Percentile] = await structure_output(reasoning, list[Percentile], model=self.get_llm("parser", "llm"))
+            result = NumericDistribution.from_question(percentile_list, question)
+
+        if model_override:
+            self._llms["default"] = GeneralLlm(model="openrouter/openai/gpt-5")
+
+        return result, reasoning
+
+    async def _run_forecast_on_binary(self, question: BinaryQuestion, research: str) -> ReasonedPrediction[float]:
+        narrative = await self._generate_narrative(question, research)
+        forecasts = []
+        reasonings = []
+        models = [
+            "openrouter/openai/gpt-5",
+            "openrouter/openai/gpt-5",
+            "openrouter/anthropic/claude-sonnet-4.5",
+            "openrouter/qwen/qwen3-235b-a22b-thinking-2507"
+        ]
+        for model in models:
+            pred, reason = await self._single_forecast(question, narrative, research, model_override=model)
+            forecasts.append(pred)
+            reasonings.append(reason)
+        median_pred = float(np.median(forecasts))
+        return ReasonedPrediction(prediction_value=median_pred, reasoning=" | ".join(reasonings))
+
+    async def _run_forecast_on_multiple_choice(self, question: MultipleChoiceQuestion, research: str) -> ReasonedPrediction[PredictedOptionList]:
+        narrative = await self._generate_narrative(question, research)
+        forecasts = []
+        reasonings = []
+        models = [
+            "openrouter/openai/gpt-5",
+            "openrouter/openai/gpt-5",
+            "openrouter/anthropic/claude-sonnet-4.5",
+            "openrouter/qwen/qwen3-235b-a22b-thinking-2507"
+        ]
+        for model in models:
+            pred, reason = await self._single_forecast(question, narrative, research, model_override=model)
+            forecasts.append(pred)
+            reasonings.append(reason)
+        all_probs = np.array([[opt["probability"] for opt in f.predicted_options] for f in forecasts])
+        median_probs = np.median(all_probs, axis=0)
+        if median_probs.sum() > 0:
+            median_probs = median_probs / median_probs.sum()
         else:
-            return "Unable to compute forecast from model responses."
+            median_probs = np.full_like(median_probs, 1.0 / len(median_probs))
+        options = forecasts[0].predicted_options
+        median_forecast = PredictedOptionList([
+            {"option": opt["option"], "probability": float(p)} for opt, p in zip(options, median_probs)
+        ])
+        return ReasonedPrediction(prediction_value=median_forecast, reasoning=" | ".join(reasonings))
 
-# -------------------------------------------------------------------
-# Entry point
-# -------------------------------------------------------------------
-async def main():
-    parser = argparse.ArgumentParser(
-        description="Run PreMortem OpenRouter ForecastBot on Metaculus tournaments."
-    )
+    async def _run_forecast_on_numeric(self, question: NumericQuestion, research: str) -> ReasonedPrediction[NumericDistribution]:
+        narrative = await self._generate_narrative(question, research)
+        forecasts = []
+        reasonings = []
+        models = [
+            "openrouter/openai/gpt-5",
+            "openrouter/openai/gpt-5",
+            "openrouter/anthropic/claude-sonnet-4.5",
+            "openrouter/qwen/qwen3-235b-a22b-thinking-2507"
+        ]
+        for model in models:
+            pred, reason = await self._single_forecast(question, narrative, research, model_override=model)
+            forecasts.append(pred)
+            reasonings.append(reason)
+        target_percentiles = [0.1, 0.2, 0.4, 0.6, 0.8, 0.9]
+        aggregated = []
+        for p in target_percentiles:
+            values = []
+            for f in forecasts:
+                for item in f.declared_percentiles:
+                    if abs(item.percentile - p) < 0.01:
+                        values.append(item.value)
+                        break
+                else:
+                    values.append(0.0)
+            median_val = float(np.median(values))
+            aggregated.append(Percentile(percentile=p, value=median_val))
+        distribution = NumericDistribution.from_question(aggregated, question)
+        return ReasonedPrediction(prediction_value=distribution, reasoning=" | ".join(reasonings))
+
+
+# -----------------------------
+# Entrypoint — Tournament Only
+# -----------------------------
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run Conservative Hybrid Bot.")
     parser.add_argument(
         "--tournament-ids",
         nargs="+",
-        default=[str(32813), str(MetaculusApi.CURRENT_MINIBENCH_ID)],
-        help="Metaculus tournament IDs"
+        type=str,
+        default=["32813", "market-pulse-25q4", MetaculusApi.CURRENT_MINIBENCH_ID],
     )
     args = parser.parse_args()
 
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    serpapi_key = os.getenv("SERP_API_KEY")
-    newsapi_key = os.getenv("NEWS_API_KEY")
-    linkup_api_key = os.getenv("LINKUP_API_KEY")
-
-    if not all([api_key, serpapi_key, newsapi_key]):
-        raise EnvironmentError("Missing one or more required API keys in environment.")
-
-    bot = PreMortemOpenRouterBot(
-        api_key=api_key,
-        serpapi_key=serpapi_key,
-        newsapi_key=newsapi_key,
-        linkup_api_key=linkup_api_key,
+    bot = ConservativeHybridBot(
         research_reports_per_question=1,
         predictions_per_research_report=1,
-        use_research_summary_to_forecast=False,
         publish_reports_to_metaculus=True,
-        folder_to_save_reports_to="forecasts",
-        skip_previously_forecasted_questions=False,
+        skip_previously_forecasted_questions=True,
     )
 
-    for tid in args.tournament_ids:
-        logger.info
+    try:
+        all_reports = []
+        for tid in args.tournament_ids:
+            logger.info(f"Forecasting on tournament: {tid}")
+            reports = asyncio.run(bot.forecast_on_tournament(tid, return_exceptions=True))
+            all_reports.extend(reports)
+        bot.log_report_summary(all_reports)
+        logger.info("Run completed successfully.")
+    except Exception as e:
+        logger.error(f"Critical error: {e}", exc_info=True)
