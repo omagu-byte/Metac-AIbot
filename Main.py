@@ -171,7 +171,7 @@ class ConservativeHybridBot(ForecastBot):
             """)
             reasoning = await self.get_llm("default", "llm").invoke(prompt)
             pred: BinaryPrediction = await structure_output(reasoning, BinaryPrediction, model=self.get_llm("parser", "llm"))
-            result = max(0.01, min(0.99, pred.prediction_in_decimal)
+            result = max(0.01), min(0.99, pred.prediction_in_decimal)
 
         elif isinstance(question, MultipleChoiceQuestion):
             prompt = clean_indents(f"""
