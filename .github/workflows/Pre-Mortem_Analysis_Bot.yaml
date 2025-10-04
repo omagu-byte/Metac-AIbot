@@ -52,7 +52,9 @@ jobs:
       - name: Install dependencies
         if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
         run: poetry install --no-interaction --no-root
-
+- name: Install dependencies
+  run:  pip install tavily-python
+    
       # Step 6: Executes the main Python script for the bot.
       - name: Run Pre-Mortem Bot
         # IMPORTANT: Make sure your main Python script is named 'main.py' or update this line.
