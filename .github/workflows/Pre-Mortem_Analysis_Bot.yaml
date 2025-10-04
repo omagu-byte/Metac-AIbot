@@ -65,4 +65,4 @@ jobs:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
-          
+          NEWSAPI_API_KEY: ${{ secrets.NEWSAPI_API_KEY }}
