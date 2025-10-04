@@ -1,13 +1,12 @@
 # main.py
-# Enhanced Conservative Forecasting Bot — Perplexity-Only + 5 Key Upgrades
+# Enhanced Conservative Forecasting Bot — Fully Corrected for OpenRouter
 
 import argparse
 import asyncio
 import logging
 import os
+import re
 from datetime import datetime
-from functools import lru_cache
-from typing import Optional, List
 
 import numpy as np
 from forecasting_tools import (
@@ -27,22 +26,11 @@ from forecasting_tools import (
     structure_output,
 )
 
-# For quantitative extraction
-from pydantic import BaseModel
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger("ConservativeHybridBot")
-
-
-class KeyMetrics(BaseModel):
-    """Extracted quantitative anchors from research."""
-    current_value: Optional[float] = None
-    historical_min: Optional[float] = None
-    historical_max: Optional[float] = None
-    relevant_numbers: List[float] = []
 
 
 class ConservativeHybridBot(ForecastBot):
@@ -54,7 +42,8 @@ class ConservativeHybridBot(ForecastBot):
             "default": "openrouter/openai/gpt-5",
             "parser": "openrouter/openai/gpt-4.1-mini",
             "summarizer": "openrouter/openai/gpt-5",
-            "researcher": "openrouter/perplexity/llama-3.1-sonar-huge-128k-online",
+            # ✅ CORRECTED: use 'large' — 'huge' is not available on OpenRouter
+            "researcher": "openrouter/perplexity/llama-3.1-sonar-large-128k-online",
             "critiquer": "openrouter/anthropic/claude-3.5-sonnet",
         }
 
@@ -66,60 +55,47 @@ class ConservativeHybridBot(ForecastBot):
             "geopolitical": "Use UN, Reuters, Associated Press, official government statements, or BBC.",
             "tech": "Reference arXiv, IEEE, official company blogs, or credible tech journals.",
             "climate": "Use IPCC, NOAA, NASA, or peer-reviewed climate science sources.",
+            "finance": "Use SEC filings, Bloomberg, Reuters, or official investor relations pages.",
         }
 
     def _get_domain_hint(self, text: str) -> str:
         t = text.lower()
+        if any(kw in t for kw in ["revenue", "earnings", "stock", "sp500", "s&p 500", "market cap", "nasdaq", "nyse"]):
+            return self._domain_hints["finance"]
         if any(kw in t for kw in ["gdp", "inflation", "interest rate", "fed", "ecb", "economy"]):
             return self._domain_hints["economic"]
         if any(kw in t for kw in ["virus", "vaccine", "disease", "who", "cdc", "health"]):
             return self._domain_hints["health"]
         if any(kw in t for kw in ["war", "election", "sanction", "un", "nato", "protest"]):
             return self._domain_hints["geopolitical"]
-        if any(kw in t for kw in ["ai", "chip", "semiconductor", "arxiv", "model", "algorithm"]):
+        if any(kw in t for kw in ["ai", "chip", "semiconductor", "arxiv", "model", "algorithm", "meta", "msft", "tsla", "ares", "mstr", "app"]):
             return self._domain_hints["tech"]
         if any(kw in t for kw in ["temperature", "co2", "emission", "ipcc", "climate", "weather"]):
             return self._domain_hints["climate"]
         return ""
 
-    @lru_cache(maxsize=128)
-    def _cached_research(self, question_text: str, date_str: str) -> str:
-        """Cached research — same question on same day returns same result."""
-        # This method is sync; called via run_in_executor
-        raise NotImplementedError("Should not be called directly")
-
     async def run_research(self, question: MetaculusQuestion) -> str:
         async with self._concurrency_limiter:
-            loop = asyncio.get_running_loop()
-            # Use cache key: (question_text, YYYY-MM-DD)
-            cache_key = (question.question_text, datetime.now().strftime("%Y-%m-%d"))
+            hint = self._get_domain_hint(question.question_text)
+            base = question.question_text
+            variants = [
+                f"What is the latest on: {base}?",
+                f"What credible sources report about: {base}?",
+                f"What are key uncertainties regarding: {base}?"
+            ]
+            if hint:
+                variants = [f"{v} {hint}" for v in variants]
+
+            tasks = []
+            for v in variants:
+                prompt = clean_indents(f"""
+                Today: {datetime.now().strftime("%Y-%m-%d")}
+                {v}
+                """)
+                tasks.append(self.get_llm("researcher", "llm").invoke(prompt))
             
-            # Define the actual research function for caching
-            def _do_research(q_text: str, d_str: str) -> str:
-                hint = self._get_domain_hint(q_text)
-                base = q_text
-                variants = [
-                    f"What is the latest on: {base}?",
-                    f"What credible sources report about: {base}?",
-                    f"What are key uncertainties regarding: {base}?"
-                ]
-                if hint:
-                    variants = [f"{v} {hint}" for v in variants]
-
-                # Run sync Perplexity calls (via litellm under the hood)
-                results = []
-                for v in variants:
-                    prompt = clean_indents(f"""
-                    Today: {d_str}
-                    {v}
-                    """)
-                    result = asyncio.run(self.get_llm("researcher", "llm").invoke(prompt))
-                    results.append(result)
-                return "\n\n--- VARIANT ---\n".join(f"Variant {i+1}:\n{r}" for i, r in enumerate(results))
-
-            # Bypass lru_cache limitation by using a wrapper
-            research = await loop.run_in_executor(None, lambda: _do_research(*cache_key))
-            return f"--- SOURCE PERPLEXITY (SELF-CONSISTENCY) ---\n{research}\n\n"
+            results = await asyncio.gather(*tasks)
+            return "\n\n--- VARIANT ---\n".join(f"Variant {i+1}:\n{r}" for i, r in enumerate(results))
 
     async def _generate_narrative(self, question: MetaculusQuestion, research: str) -> str:
         draft_prompt = clean_indents(f"""
@@ -132,7 +108,6 @@ class ConservativeHybridBot(ForecastBot):
         """)
         draft = await self.get_llm("summarizer", "llm").invoke(draft_prompt)
 
-        # Red-team critique
         critique_prompt = clean_indents(f"""
         You are a skeptical red-team reviewer. Identify weaknesses, missing evidence,
         overconfident claims, or alternative interpretations in this analysis:
@@ -140,7 +115,6 @@ class ConservativeHybridBot(ForecastBot):
         """)
         critique = await self.get_llm("critiquer", "llm").invoke(critique_prompt)
 
-        # Final revision
         final_prompt = clean_indents(f"""
         Revise the following analysis to address the critique. Maintain a professional,
         evidence-based tone and explicitly acknowledge key uncertainties.
@@ -198,16 +172,21 @@ class ConservativeHybridBot(ForecastBot):
                 )
 
             elif isinstance(question, NumericQuestion):
-                # Extract quantitative anchors
-                try:
-                    metrics: KeyMetrics = await structure_output(
-                        research, KeyMetrics, model=self.get_llm("parser", "llm")
-                    )
-                    numbers_str = ", ".join(str(x) for x in metrics.relevant_numbers[:5])
-                    if numbers_str:
-                        research += f"\n\nExtracted numbers: {numbers_str}"
-                except Exception as e:
-                    logger.warning(f"Quantitative extraction failed: {e}")
+                # Extract numbers using regex (no external deps)
+                numbers = re.findall(r'\b\d+\.?\d*\b', research)
+                float_numbers = []
+                for n in numbers:
+                    try:
+                        val = float(n)
+                        # Skip years (2000–2100) and extremely large outliers
+                        if 0 <= val <= 1e9 and not (2000 <= val <= 2100):
+                            float_numbers.append(val)
+                    except ValueError:
+                        continue
+                
+                if float_numbers:
+                    numbers_str = ", ".join(f"{x:g}" for x in float_numbers[:5])
+                    research += f"\n\nExtracted relevant numbers: {numbers_str}"
 
                 lower_msg = f"Lower bound: {'open' if question.open_lower_bound else 'closed'} at {question.lower_bound or question.nominal_lower_bound}"
                 upper_msg = f"Upper bound: {'open' if question.open_upper_bound else 'closed'} at {question.upper_bound or question.nominal_upper_bound}"
@@ -232,9 +211,6 @@ class ConservativeHybridBot(ForecastBot):
         finally:
             if model_override:
                 self._llms["default"] = original_default
-
-    # ... rest of the forecasting methods unchanged ...
-    # (Keep your existing _run_forecast_on_binary, _run_forecast_on_multiple_choice, _run_forecast_on_numeric)
 
     async def _run_forecast_on_binary(self, question: BinaryQuestion, research: str) -> ReasonedPrediction[float]:
         narrative = await self._generate_narrative(question, research)
