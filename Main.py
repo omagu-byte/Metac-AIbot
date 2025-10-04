@@ -40,7 +40,7 @@ logger = logging.getLogger("ConservativeHybridBot")
 class ConservativeHybridBot(ForecastBot):
     """
     Tournament-only bot using:
-    - Research: SerpApi + NewsAPI + Linkup + Perplexity (deep)
+    - Research: SerpApi + Linkup → fallback to Perplexity (via OpenRouter) if both fail
     - Models: gpt-5 (default/summarizer), gpt-4.1-mini (parser), claude-sonnet-4.5, qwen3
     - Committee: 4 forecasters → median
     - Compliance: structure_output + NumericDistribution.from_question()
@@ -60,16 +60,16 @@ class ConservativeHybridBot(ForecastBot):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.serpapi_key = os.getenv("SERP_API_KEY")
-        self.newsapi_key = os.getenv("NEWSAPI_API_KEY")
         self.linkup_api_key = os.getenv("LINKUP_API_KEY")
-        if not all([self.serpapi_key, self.newsapi_api_key, self.linkup_api_key]):
-            raise EnvironmentError("SERP_API_KEY, NEWSAPI_API_KEY, and LINKUP_API_KEY must be set.")
+        if not all([self.serpapi_key, self.linkup_api_key]):
+            raise EnvironmentError("SERP_API_KEY and LINKUP_API_KEY must be set.")
 
     # -----------------------------
-    # Multi-Source Research (SerpApi + NewsAPI + Linkup + Perplexity)
+    # Multi-Source Research (SerpApi + Linkup → Perplexity fallback)
     # -----------------------------
     def call_serpapi(self, query: str) -> str:
-        if not self.serpapi_key: return ""
+        if not self.serpapi_key:
+            return ""
         try:
             response = requests.get(
                 "https://serpapi.com/search.json",
@@ -83,27 +83,12 @@ class ConservativeHybridBot(ForecastBot):
                 for item in data.get("news_results", [])
             ])
         except Exception as e:
-            return f"SerpApi failed: {e}"
-
-    def call_newsapi(self, query: str) -> str:
-        if not self.newsapi_key: return ""
-        try:
-            response = requests.get(
-                "https://newsapi.org/v2/everything",
-                params={"q": query, "apiKey": self.newsapi_api_key, "pageSize": 5},
-                timeout=10
-            )
-            response.raise_for_status()
-            data = response.json()
-            return "\n".join([
-                f"- {a.get('title', '')}: {a.get('description', '')}"
-                for a in data.get("articles", [])
-            ])
-        except Exception as e:
-            return f"NewsAPI failed: {e}"
+            logger.warning(f"SerpApi failed: {e}")
+            return ""
 
     def call_linkup(self, query: str) -> str:
-        if not self.linkup_api_key: return ""
+        if not self.linkup_api_key:
+            return ""
         try:
             response = requests.post(
                 "https://api.linkup.so/v1/search",
@@ -118,22 +103,35 @@ class ConservativeHybridBot(ForecastBot):
                 for r in data.get("results", [])
             ])
         except Exception as e:
-            return f"Linkup failed: {e}"
+            logger.warning(f"Linkup failed: {e}")
+            return ""
 
     async def run_research(self, question: MetaculusQuestion) -> str:
         async with self._concurrency_limiter:
             loop = asyncio.get_running_loop()
-            tasks = {
-                "serpapi": loop.run_in_executor(None, self.call_serpapi, question.question_text),
-                "newsapi": loop.run_in_executor(None, self.call_newsapi, question.question_text),
-                "linkup": loop.run_in_executor(None, self.call_linkup, question.question_text),
-                "perplexity": self.get_llm("researcher", "llm").invoke(question.question_text)
-            }
-            results = await asyncio.gather(*tasks.values(), return_exceptions=True)
-            raw_research = ""
-            for i, result in enumerate(results):
-                raw_research += f"--- SOURCE {list(tasks.keys())[i].upper()} ---\n{result}\n\n"
-            return raw_research
+            
+            # Run SerpApi and Linkup in parallel
+            serp_task = loop.run_in_executor(None, self.call_serpapi, question.question_text)
+            linkup_task = loop.run_in_executor(None, self.call_linkup, question.question_text)
+            
+            serp_result, linkup_result = await asyncio.gather(serp_task, linkup_task, return_exceptions=True)
+            
+            # Normalize results: treat exceptions or falsy values as empty
+            serp_str = serp_result if isinstance(serp_result, str) and serp_result.strip() else ""
+            linkup_str = linkup_result if isinstance(linkup_result, str) and linkup_result.strip() else ""
+            
+            # If both are empty, fallback to Perplexity via OpenRouter
+            if not serp_str and not linkup_str:
+                logger.info("SerpApi and Linkup returned no usable results; falling back to Perplexity researcher.")
+                perplexity_result = await self.get_llm("researcher", "llm").invoke(question.question_text)
+                return f"--- SOURCE PERPLEXITY ---\n{perplexity_result}\n\n"
+            else:
+                raw_research = ""
+                if serp_str:
+                    raw_research += f"--- SOURCE SERPAPI ---\n{serp_str}\n\n"
+                if linkup_str:
+                    raw_research += f"--- SOURCE LINKUP ---\n{linkup_str}\n\n"
+                return raw_research
 
     # -----------------------------
     # Conservative Forecasting with 4-Model Committee
@@ -150,71 +148,74 @@ class ConservativeHybridBot(ForecastBot):
         return await self.get_llm("summarizer", "llm").invoke(prompt)
 
     async def _single_forecast(self, question, narrative: str, research: str, model_override: str = None):
+        original_default = self._llms.get("default")
         if model_override:
             self._llms["default"] = GeneralLlm(model=model_override)
 
-        if isinstance(question, BinaryQuestion):
-            prompt = clean_indents(f"""
-            Conservative professional forecaster.
+        try:
+            if isinstance(question, BinaryQuestion):
+                prompt = clean_indents(f"""
+                Conservative professional forecaster.
 
-            Question: {question.question_text}
-            Background: {question.background_info}
-            Resolution: {question.resolution_criteria}
-            Fine print: {question.fine_print}
-            Narrative: {narrative}
-            Research: {research}
-            Today: {datetime.now().strftime("%Y-%m-%d")}
+                Question: {question.question_text}
+                Background: {question.background_info}
+                Resolution: {question.resolution_criteria}
+                Fine print: {question.fine_print}
+                Narrative: {narrative}
+                Research: {research}
+                Today: {datetime.now().strftime("%Y-%m-%d")}
 
-            Favor status quo. Avoid overconfidence.
+                Favor status quo. Avoid overconfidence.
 
-            End with: "Probability: ZZ%"
-            """)
-            reasoning = await self.get_llm("default", "llm").invoke(prompt)
-            pred: BinaryPrediction = await structure_output(reasoning, BinaryPrediction, model=self.get_llm("parser", "llm"))
-            result = max(0.01), min(0.99, pred.prediction_in_decimal)
+                End with: "Probability: ZZ%"
+                """)
+                reasoning = await self.get_llm("default", "llm").invoke(prompt)
+                pred: BinaryPrediction = await structure_output(reasoning, BinaryPrediction, model=self.get_llm("parser", "llm"))
+                result = max(0.01, min(0.99, pred.prediction_in_decimal))
 
-        elif isinstance(question, MultipleChoiceQuestion):
-            prompt = clean_indents(f"""
-            Question: {question.question_text}
-            Options: {question.options}
-            Narrative: {narrative}
-            Research: {research}
-            Today: {datetime.now().strftime("%Y-%m-%d")}
+            elif isinstance(question, MultipleChoiceQuestion):
+                prompt = clean_indents(f"""
+                Question: {question.question_text}
+                Options: {question.options}
+                Narrative: {narrative}
+                Research: {research}
+                Today: {datetime.now().strftime("%Y-%m-%d")}
 
-            Assign probabilities. No 0% unless logically impossible.
+                Assign probabilities. No 0% unless logically impossible.
 
-            End with probabilities for each option in order.
-            """)
-            reasoning = await self.get_llm("default", "llm").invoke(prompt)
-            result = await structure_output(
-                reasoning, PredictedOptionList, model=self.get_llm("parser", "llm"),
-                additional_instructions=f"Options must be exactly: {question.options}"
-            )
+                End with probabilities for each option in order.
+                """)
+                reasoning = await self.get_llm("default", "llm").invoke(prompt)
+                result = await structure_output(
+                    reasoning, PredictedOptionList, model=self.get_llm("parser", "llm"),
+                    additional_instructions=f"Options must be exactly: {question.options}"
+                )
 
-        elif isinstance(question, NumericQuestion):
-            lower_msg = f"Lower bound: {'open' if question.open_lower_bound else 'closed'} at {question.lower_bound or question.nominal_lower_bound}"
-            upper_msg = f"Upper bound: {'open' if question.open_upper_bound else 'closed'} at {question.upper_bound or question.nominal_upper_bound}"
-            prompt = clean_indents(f"""
-            Conservative forecaster. Set wide 90/10 intervals.
+            elif isinstance(question, NumericQuestion):
+                lower_msg = f"Lower bound: {'open' if question.open_lower_bound else 'closed'} at {question.lower_bound or question.nominal_lower_bound}"
+                upper_msg = f"Upper bound: {'open' if question.open_upper_bound else 'closed'} at {question.upper_bound or question.nominal_upper_bound}"
+                prompt = clean_indents(f"""
+                Conservative forecaster. Set wide 90/10 intervals.
 
-            Question: {question.question_text}
-            Units: {question.unit_of_measure or 'Infer'}
-            Narrative: {narrative}
-            Research: {research}
-            {lower_msg}
-            {upper_msg}
-            Today: {datetime.now().strftime("%Y-%m-%d")}
+                Question: {question.question_text}
+                Units: {question.unit_of_measure or 'Infer'}
+                Narrative: {narrative}
+                Research: {research}
+                {lower_msg}
+                {upper_msg}
+                Today: {datetime.now().strftime("%Y-%m-%d")}
 
-            Provide percentiles: 10, 20, 40, 60, 80, 90.
-            """)
-            reasoning = await self.get_llm("default", "llm").invoke(prompt)
-            percentile_list: list[Percentile] = await structure_output(reasoning, list[Percentile], model=self.get_llm("parser", "llm"))
-            result = NumericDistribution.from_question(percentile_list, question)
+                Provide percentiles: 10, 20, 40, 60, 80, 90.
+                """)
+                reasoning = await self.get_llm("default", "llm").invoke(prompt)
+                percentile_list: list[Percentile] = await structure_output(reasoning, list[Percentile], model=self.get_llm("parser", "llm"))
+                result = NumericDistribution.from_question(percentile_list, question)
 
-        if model_override:
-            self._llms["default"] = GeneralLlm(model="openrouter/openai/gpt-5")
-
-        return result, reasoning
+            return result, reasoning
+        finally:
+            # Restore original default model if overridden
+            if model_override:
+                self._llms["default"] = original_default
 
     async def _run_forecast_on_binary(self, question: BinaryQuestion, research: str) -> ReasonedPrediction[float]:
         narrative = await self._generate_narrative(question, research)
