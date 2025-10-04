@@ -43,7 +43,7 @@ class ConservativeHybridBot(ForecastBot):
             "parser": "openrouter/openai/gpt-4.1-mini",
             "summarizer": "openrouter/openai/gpt-5",
             # ✅ CORRECTED: use 'large' — 'huge' is not available on OpenRouter
-            "researcher": "openrouter/perplexity/sonar-reasoning",
+            "researcher": "openrouter/perplexity/llama-3.1-sonar-small-128k-online",
             "critiquer": "openrouter/anthropic/claude-3.5-sonnet",
         }
 
