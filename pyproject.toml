@@ -15,6 +15,7 @@ newsapi-python = "^0.2.7"
 numpy = "^1.26.4" # Pinned to a stable version, but can be updated
 aiohttp = "^3.9.5"
 beautifulsoup4 = "^4.12.3"
+tavily-python = "^0.7.12"
 
 
 [tool.poetry.group.dev.dependencies]
