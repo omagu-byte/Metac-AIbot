@@ -64,6 +64,5 @@ jobs:
           # Settings > Secrets and variables > Actions > Repository secrets
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          NEWSAPI_API_KEY: ${{ secrets.NEWSAPI_API_KEY }}
           LINKUP_API_KEY: ${{ secrets.LINKUP_API_KEY }}
-          SERPAPI_API_KEY: ${{ secrets.SERPAPI_API_KEY }} # Corrected to match the Python script's os.getenv call
+          SERP_API_KEY: ${{ secrets.SERP_API_KEY }} # Corrected to match the Python script's os.getenv call
