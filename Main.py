@@ -219,7 +219,7 @@ class ConservativeHybridBot(ForecastBot):
             "openrouter/openai/gpt-5",
             "openrouter/openai/gpt-5",
             "openrouter/anthropic/claude-sonnet-4.5",
-            "openrouter/qwen/qwen3-235b-a22b-thinking-2507"
+            "openrouter/anthropic/claude-opus-4.1"
         ]
         for model in models:
             pred, reason = await self._single_forecast(question, narrative, research, model_override=model)
@@ -236,7 +236,7 @@ class ConservativeHybridBot(ForecastBot):
             "openrouter/openai/gpt-5",
             "openrouter/openai/gpt-5",
             "openrouter/anthropic/claude-sonnet-4.5",
-            "openrouter/qwen/qwen3-235b-a22b-thinking-2507"
+            "openrouter/anthropic/claude-opus-4.1"
         ]
         for model in models:
             pred, reason = await self._single_forecast(question, narrative, research, model_override=model)
@@ -262,7 +262,7 @@ class ConservativeHybridBot(ForecastBot):
             "openrouter/openai/gpt-5",
             "openrouter/openai/gpt-5",
             "openrouter/anthropic/claude-sonnet-4.5",
-            "openrouter/qwen/qwen3-235b-a22b-thinking-2507"
+            "openrouter/anthropic/claude-opus-4.1"
         ]
         for model in models:
             pred, reason = await self._single_forecast(question, narrative, research, model_override=model)
