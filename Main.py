@@ -1,15 +1,16 @@
 # main.py
-# Final Conservative Forecasting Bot — Tournament-Only, OpenRouter-Only
+# Conservative Forecasting Bot — Tournament-Only
+# Research: Tavily (primary) + Perplexity Sonar-Huge (fallback)
+# Models: Claude 3.5 Sonnet (researcher), GPT-5 (summarizer), etc.
 
 import argparse
 import asyncio
 import logging
 import os
 from datetime import datetime
-from typing import Literal
 
 import numpy as np
-import requests
+from tavily import TavilyClient
 from forecasting_tools import (
     BinaryQuestion,
     ForecastBot,
@@ -27,9 +28,6 @@ from forecasting_tools import (
     structure_output,
 )
 
-# -----------------------------
-# Environment & Logging
-# -----------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -38,14 +36,6 @@ logger = logging.getLogger("ConservativeHybridBot")
 
 
 class ConservativeHybridBot(ForecastBot):
-    """
-    Tournament-only bot using:
-    - Research: SerpApi + Linkup → fallback to Perplexity (via OpenRouter) if both fail
-    - Models: gpt-5 (default/summarizer), gpt-4.1-mini (parser), claude-sonnet-4.5, qwen3
-    - Committee: 4 forecasters → median
-    - Compliance: structure_output + NumericDistribution.from_question()
-    """
-
     _max_concurrent_questions = 1
     _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
 
@@ -54,87 +44,71 @@ class ConservativeHybridBot(ForecastBot):
             "default": "openrouter/openai/gpt-5",
             "parser": "openrouter/openai/gpt-4.1-mini",
             "summarizer": "openrouter/openai/gpt-5",
-            "researcher": "openrouter/perplexity/sonar-deep-research",
+            "researcher": "openrouter/anthropic/claude-3.5-sonnet",
+            "deep_researcher": "openrouter/perplexity/llama-3.1-sonar-huge-128k-online",  # fallback
         }
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.serpapi_key = os.getenv("SERP_API_KEY")
-        self.linkup_api_key = os.getenv("LINKUP_API_KEY")
-        if not all([self.serpapi_key, self.linkup_api_key]):
-            raise EnvironmentError("SERP_API_KEY and LINKUP_API_KEY must be set.")
+        self.tavily_key = os.getenv("TAVILY_API_KEY")
+        if not self.tavily_key:
+            raise EnvironmentError("TAVILY_API_KEY must be set.")
+        self.tavily_client = TavilyClient(api_key=self.tavily_key)
 
-    # -----------------------------
-    # Multi-Source Research (SerpApi + Linkup → Perplexity fallback)
-    # -----------------------------
-    def call_serpapi(self, query: str) -> str:
-        if not self.serpapi_key:
-            return ""
-        try:
-            response = requests.get(
-                "https://serpapi.com/search.json",
-                params={"q": query, "api_key": self.serpapi_key, "tbm": "nws"},
-                timeout=10
-            )
-            response.raise_for_status()
-            data = response.json()
-            return "\n".join([
-                f"- {item.get('title', '')}: {item.get('snippet', '')}"
-                for item in data.get("news_results", [])
-            ])
-        except Exception as e:
-            logger.warning(f"SerpApi failed: {e}")
-            return ""
+    def _is_research_sufficient(self, text: str) -> bool:
+        """Heuristic: Tavily result is sufficient if it has an answer and content."""
+        if not text or not text.strip():
+            return False
+        has_answer = "Tavily Answer:" in text
+        has_results = "Supporting Results:" in text
+        min_length = len(text) > 150
+        return (has_answer or has_results) and min_length
 
-    def call_linkup(self, query: str) -> str:
-        if not self.linkup_api_key:
-            return ""
+    def call_tavily(self, query: str) -> str:
         try:
-            response = requests.post(
-                "https://api.linkup.so/v1/search",
-                headers={"Authorization": f"Bearer {self.linkup_api_key}"},
-                json={"query": query},
-                timeout=10
+            response = self.tavily_client.search(
+                query=query,
+                search_depth="advanced",
+                include_answer=True,
+                max_results=6,
             )
-            response.raise_for_status()
-            data = response.json()
-            return "\n".join([
-                f"- {r.get('title', '')}: {r.get('snippet', '')}"
-                for r in data.get("results", [])
-            ])
+            answer = response.get("answer", "").strip()
+            results = response.get("results", [])
+            snippets = [
+                f"- {res.get('title', '')}: {res.get('content', '')}"
+                for res in results[:4]  # top 4
+            ]
+            parts = []
+            if answer:
+                parts.append(f"Tavily Answer:\n{answer}")
+            if snippets:
+                parts.append("Supporting Results:\n" + "\n".join(snippets))
+            return "\n\n".join(parts)
         except Exception as e:
-            logger.warning(f"Linkup failed: {e}")
+            logger.warning(f"Tavily failed: {e}")
             return ""
 
     async def run_research(self, question: MetaculusQuestion) -> str:
         async with self._concurrency_limiter:
             loop = asyncio.get_running_loop()
-            
-            # Run SerpApi and Linkup in parallel
-            serp_task = loop.run_in_executor(None, self.call_serpapi, question.question_text)
-            linkup_task = loop.run_in_executor(None, self.call_linkup, question.question_text)
-            
-            serp_result, linkup_result = await asyncio.gather(serp_task, linkup_task, return_exceptions=True)
-            
-            # Normalize results: treat exceptions or falsy values as empty
-            serp_str = serp_result if isinstance(serp_result, str) and serp_result.strip() else ""
-            linkup_str = linkup_result if isinstance(linkup_result, str) and linkup_result.strip() else ""
-            
-            # If both are empty, fallback to Perplexity via OpenRouter
-            if not serp_str and not linkup_str:
-                logger.info("SerpApi and Linkup returned no usable results; falling back to Perplexity researcher.")
-                perplexity_result = await self.get_llm("researcher", "llm").invoke(question.question_text)
-                return f"--- SOURCE PERPLEXITY ---\n{perplexity_result}\n\n"
+            tavily_result = await loop.run_in_executor(None, self.call_tavily, question.question_text)
+
+            if self._is_research_sufficient(tavily_result):
+                logger.info("Tavily returned sufficient results.")
+                return f"--- SOURCE TAVILY ---\n{tavily_result}\n\n"
             else:
-                raw_research = ""
-                if serp_str:
-                    raw_research += f"--- SOURCE SERPAPI ---\n{serp_str}\n\n"
-                if linkup_str:
-                    raw_research += f"--- SOURCE LINKUP ---\n{linkup_str}\n\n"
-                return raw_research
+                logger.info("Tavily result insufficient; falling back to Perplexity deep research.")
+                fallback_prompt = (
+                    f"Conduct a thorough, up-to-date investigation of the following question. "
+                    f"Focus on credible sources, recent developments, and key uncertainties.\n\n"
+                    f"Question: {question.question_text}\n\n"
+                    f"Today's date: {datetime.now().strftime('%Y-%m-%d')}"
+                )
+                perplexity_result = await self.get_llm("deep_researcher", "llm").invoke(fallback_prompt)
+                return f"--- SOURCE PERPLEXITY (FALLBACK) ---\n{perplexity_result}\n\n"
 
     # -----------------------------
-    # Conservative Forecasting with 4-Model Committee
+    # Forecasting logic (unchanged)
     # -----------------------------
     async def _generate_narrative(self, question: MetaculusQuestion, research: str) -> str:
         prompt = clean_indents(f"""
@@ -213,7 +187,6 @@ class ConservativeHybridBot(ForecastBot):
 
             return result, reasoning
         finally:
-            # Restore original default model if overridden
             if model_override:
                 self._llms["default"] = original_default
 
@@ -291,9 +264,6 @@ class ConservativeHybridBot(ForecastBot):
         return ReasonedPrediction(prediction_value=distribution, reasoning=" | ".join(reasonings))
 
 
-# -----------------------------
-# Entrypoint — Tournament Only
-# -----------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Conservative Hybrid Bot.")
     parser.add_argument(
