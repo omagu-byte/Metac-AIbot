@@ -60,10 +60,10 @@ class ConservativeHybridBot(ForecastBot):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.serpapi_key = os.getenv("SERP_API_KEY")
-        self.newsapi_key = os.getenv("NEWS_API_KEY")
+        self.newsapi_key = os.getenv("NEWSAPI_API_KEY")
         self.linkup_api_key = os.getenv("LINKUP_API_KEY")
-        if not all([self.serpapi_key, self.newsapi_key, self.linkup_api_key]):
-            raise EnvironmentError("SERP_API_KEY, NEWS_API_KEY, and LINKUP_API_KEY must be set.")
+        if not all([self.serpapi_key, self.newsapi_api_key, self.linkup_api_key]):
+            raise EnvironmentError("SERP_API_KEY, NEWSAPI_API_KEY, and LINKUP_API_KEY must be set.")
 
     # -----------------------------
     # Multi-Source Research (SerpApi + NewsAPI + Linkup + Perplexity)
@@ -90,7 +90,7 @@ class ConservativeHybridBot(ForecastBot):
         try:
             response = requests.get(
                 "https://newsapi.org/v2/everything",
-                params={"q": query, "apiKey": self.newsapi_key, "pageSize": 5},
+                params={"q": query, "apiKey": self.newsapi_api_key, "pageSize": 5},
                 timeout=10
             )
             response.raise_for_status()
