@@ -42,7 +42,7 @@ class ConservativeHybridBot(ForecastBot):
             "default": "openrouter/openai/gpt-5",
             "parser": "openrouter/openai/gpt-4.1-mini",
             "summarizer": "openrouter/openai/gpt-5",
-            "researcher": "openrouter/perplexity/mistral-7b-instruct-online",
+            "researcher": "openrouter/openai/gpt-5",
             "critiquer": "openrouter/anthropic/claude-3.5-sonnet",
         }
 
