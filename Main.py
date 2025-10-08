@@ -43,7 +43,7 @@ class ConservativeHybridBot(ForecastBot):
             "parser": "openrouter/openai/gpt-4.1-mini",
             "summarizer": "openrouter/openai/gpt-5",
             "researcher": "openrouter/openai/gpt-5",
-            "critiquer": "openrouter/anthropic/claude-3.5-sonnet",
+            "critiquer": "openrouter/openai/gpt-5",
         }
 
     def __init__(self, *args, **kwargs):
