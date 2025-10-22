@@ -1,6 +1,5 @@
 # main.py
-# Enhanced Conservative Forecasting Bot — Confident & Risk-Aware Mode
-# Model names preserved as requested
+# Confident Conservative Forecasting Bot — Fully Fixed for Multiple-Choice Errors
 
 import argparse
 import asyncio
@@ -174,7 +173,6 @@ class ConfidentConservativeBot(ForecastBot):
                     pred: BinaryPrediction = await structure_output(
                         reasoning, BinaryPrediction, model=self.get_llm("parser", "llm")
                     )
-                    # Allow bolder range: [0.001, 0.999]
                     result = max(0.001, min(0.999, pred.prediction_in_decimal))
                 except Exception as e:
                     logger.warning(f"Failed to parse binary prediction: {e}. Using 0.5.")
@@ -184,27 +182,47 @@ class ConfidentConservativeBot(ForecastBot):
             elif isinstance(question, MultipleChoiceQuestion):
                 options_repr = repr(question.options)
                 prompt = clean_indents(f"""
-                Assign decisive probabilities based on evidence—even if one option dominates.
-                Avoid uniformity unless truly no signal exists.
-                Zero probability ONLY if logically impossible.
+                Assign precise decimal probabilities to EACH option that SUM EXACTLY TO 1.0.
+                - Use numbers like 0.75, not "high" or "medium".
+                - Do NOT assign probabilities that sum to more or less than 1.0.
+                - Zero probability ONLY if logically impossible.
 
                 Question: {repr(question.question_text)}
                 Options: {options_repr}
                 Narrative: {narrative}
                 Research: {research}
                 Today: {today_str}
+
+                Output ONLY the final probabilities in a valid JSON format.
                 """)
                 reasoning = await self.get_llm("default", "llm").invoke(prompt)
                 try:
-                    result = await structure_output(
-                        reasoning, PredictedOptionList, model=self.get_llm("parser", "llm"),
-                        additional_instructions=f"Options must be exactly: {options_repr}"
+                    result: PredictedOptionList = await structure_output(
+                        reasoning,
+                        PredictedOptionList,
+                        model=self.get_llm("parser", "llm"),
+                        additional_instructions=(
+                            f"Options must be exactly: {options_repr}. "
+                            "Probabilities MUST sum to 1.0. Use field 'option_name', not 'option'."
+                        )
                     )
+                    # Validate and normalize if needed
+                    probs = [opt.probability for opt in result.predicted_options]
+                    total = sum(probs)
+                    if abs(total - 1.0) > 0.05:
+                        raise ValueError(f"Probabilities sum to {total:.3f}, which is too far from 1.0")
+                    elif abs(total - 1.0) > 1e-6:
+                        # Normalize minor floating-point errors
+                        normalized = [p / total for p in probs]
+                        result = PredictedOptionList([
+                            {"option_name": opt.option_name, "probability": float(p)}
+                            for opt, p in zip(result.predicted_options, normalized)
+                        ])
                 except Exception as e:
-                    logger.warning(f"Failed to parse MC prediction: {e}. Using uniform.")
+                    logger.warning(f"Failed to parse or validate MC prediction: {e}. Using uniform fallback.")
                     uniform_prob = 1.0 / len(question.options)
                     result = PredictedOptionList([
-                        {"option": opt, "probability": uniform_prob} for opt in question.options
+                        {"option_name": opt, "probability": uniform_prob} for opt in question.options
                     ])
                     reasoning += f"\n[PARSING FAILED: {e}]"
 
@@ -257,7 +275,6 @@ class ConfidentConservativeBot(ForecastBot):
             if model_override:
                 self._llms["default"] = original_default
 
-    # Keep the same ensemble logic as before (using _ENSEMBLE_MODELS)
     async def _run_forecast_on_binary(self, question: BinaryQuestion, research: str) -> ReasonedPrediction[float]:
         narrative = await self._generate_narrative(question, research)
         forecasts = []
@@ -277,15 +294,18 @@ class ConfidentConservativeBot(ForecastBot):
             pred, reason = await self._single_forecast(question, narrative, research, model_override=model)
             forecasts.append(pred)
             reasonings.append(reason)
-        all_probs = np.array([[opt["probability"] for opt in f.predicted_options] for f in forecasts])
+        # FIX: Use .probability (not ["probability"]) — PredictedOption is a Pydantic model
+        all_probs = np.array([[opt.probability for opt in f.predicted_options] for f in forecasts])
         median_probs = np.median(all_probs, axis=0)
         if median_probs.sum() > 0:
             median_probs = median_probs / median_probs.sum()
         else:
             median_probs = np.full_like(median_probs, 1.0 / len(median_probs))
-        options = forecasts[0].predicted_options
+        # FIX: Use .option_name and construct with "option_name"
+        reference_forecast = forecasts[0]
         median_forecast = PredictedOptionList([
-            {"option": opt["option"], "probability": float(p)} for opt, p in zip(options, median_probs)
+            {"option_name": opt.option_name, "probability": float(p)}
+            for opt, p in zip(reference_forecast.predicted_options, median_probs)
         ])
         return ReasonedPrediction(prediction_value=median_forecast, reasoning=" | ".join(reasonings))
 
@@ -319,10 +339,16 @@ class ConfidentConservativeBot(ForecastBot):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Confident Conservative Hybrid Bot.")
     parser.add_argument(
-        "--tournament-ids",
-        nargs="+",
-        type=str,
-        default=["32813", "fiscal", "metaculus-cup-fall-2025", "market-pulse-25q4", MetaculusApi.CURRENT_MINIBENCH_ID],
+    "--tournament-ids",
+    nargs="+",
+    type=str,
+    default=[
+        "32813",
+        "market-pulse-25q4",
+        "fiscal",
+        "metaculus-cup-fall-2025",
+        MetaculusApi.CURRENT_MINIBENCH_ID,
+    ],
     )
     args = parser.parse_args()
 
