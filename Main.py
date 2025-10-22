@@ -1,12 +1,13 @@
 # main.py
-# Enhanced Conservative Forecasting Bot — Fully Corrected for OpenRouter
+# Enhanced Conservative Forecasting Bot — Confident & Risk-Aware Mode
+# Model names preserved as requested
 
 import argparse
 import asyncio
 import logging
-import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import List
 
 import numpy as np
 from forecasting_tools import (
@@ -30,10 +31,18 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
-logger = logging.getLogger("ConservativeHybridBot")
+logger = logging.getLogger("ConfidentConservativeBot")
 
 
-class ConservativeHybridBot(ForecastBot):
+_ENSEMBLE_MODELS: List[str] = [
+    "openrouter/openai/gpt-5",
+    "openrouter/anthropic/claude-sonnet-4.5",
+    "openrouter/openai/gpt-4o",
+    "openrouter/openai/gpt-5",
+]
+
+
+class ConfidentConservativeBot(ForecastBot):
     _max_concurrent_questions = 1
     _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
 
@@ -56,21 +65,19 @@ class ConservativeHybridBot(ForecastBot):
             "climate": "Use IPCC, NOAA, NASA, or peer-reviewed climate science sources.",
             "finance": "Use SEC filings, Bloomberg, Reuters, or official investor relations pages.",
         }
+        self._domain_patterns = {
+            "finance": re.compile(r"\b(revenue|earnings|stock|sp500|s&p 500|market cap|nasdaq|nyse)\b", re.IGNORECASE),
+            "economic": re.compile(r"\b(gdp|inflation|interest rate|fed|ecb|economy)\b", re.IGNORECASE),
+            "health": re.compile(r"\b(virus|vaccine|disease|who|cdc|health)\b", re.IGNORECASE),
+            "geopolitical": re.compile(r"\b(war|election|sanction|un|nato|protest)\b", re.IGNORECASE),
+            "tech": re.compile(r"\b(ai|chip|semiconductor|arxiv|model|algorithm|meta|msft|tsla|ares|mstr|app)\b", re.IGNORECASE),
+            "climate": re.compile(r"\b(temperature|co2|emission|ipcc|climate|weather)\b", re.IGNORECASE),
+        }
 
     def _get_domain_hint(self, text: str) -> str:
-        t = text.lower()
-        if any(kw in t for kw in ["revenue", "earnings", "stock", "sp500", "s&p 500", "market cap", "nasdaq", "nyse"]):
-            return self._domain_hints["finance"]
-        if any(kw in t for kw in ["gdp", "inflation", "interest rate", "fed", "ecb", "economy"]):
-            return self._domain_hints["economic"]
-        if any(kw in t for kw in ["virus", "vaccine", "disease", "who", "cdc", "health"]):
-            return self._domain_hints["health"]
-        if any(kw in t for kw in ["war", "election", "sanction", "un", "nato", "protest"]):
-            return self._domain_hints["geopolitical"]
-        if any(kw in t for kw in ["ai", "chip", "semiconductor", "arxiv", "model", "algorithm", "meta", "msft", "tsla", "ares", "mstr", "app"]):
-            return self._domain_hints["tech"]
-        if any(kw in t for kw in ["temperature", "co2", "emission", "ipcc", "climate", "weather"]):
-            return self._domain_hints["climate"]
+        for domain, pattern in self._domain_patterns.items():
+            if pattern.search(text):
+                return self._domain_hints[domain]
         return ""
 
     async def run_research(self, question: MetaculusQuestion) -> str:
@@ -78,45 +85,57 @@ class ConservativeHybridBot(ForecastBot):
             hint = self._get_domain_hint(question.question_text)
             base = question.question_text
             variants = [
-                f"What is the latest on: {base}?",
-                f"What credible sources report about: {base}?",
-                f"What are key uncertainties regarding: {base}?"
+                f"What is the latest credible evidence on: {base}?",
+                f"What would strongly update a rational forecaster's view on: {base}?",
+                f"What are the most decisive indicators or inflection points for: {base}?"
             ]
             if hint:
                 variants = [f"{v} {hint}" for v in variants]
 
             tasks = []
+            today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             for v in variants:
                 prompt = clean_indents(f"""
-                Today: {datetime.now().strftime("%Y-%m-%d")}
+                Today: {today_str}
                 {v}
                 """)
                 tasks.append(self.get_llm("researcher", "llm").invoke(prompt))
             
-            results = await asyncio.gather(*tasks)
-            return "\n\n--- VARIANT ---\n".join(f"Variant {i+1}:\n{r}" for i, r in enumerate(results))
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            safe_results = []
+            for i, r in enumerate(results):
+                if isinstance(r, Exception):
+                    logger.warning(f"Research variant {i+1} failed: {r}")
+                    safe_results.append(f"[ERROR: {str(r)}]")
+                else:
+                    safe_results.append(r)
+            return "\n\n--- VARIANT ---\n".join(f"Variant {i+1}:\n{r}" for i, r in enumerate(safe_results))
 
     async def _generate_narrative(self, question: MetaculusQuestion, research: str) -> str:
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         draft_prompt = clean_indents(f"""
-        You are a senior analyst. Write a concise, evidence-based narrative that explains
-        key drivers, uncertainties, and plausible scenarios for this question.
+        You are a top-tier geopolitical/economic/technical forecaster with a track record of bold, correct calls.
+        Synthesize the research into a decisive, evidence-based narrative.
+        Identify the MOST LIKELY outcome and key inflection points.
+        Do not hedge unnecessarily—state clear conclusions when evidence supports them.
 
-        Question: {question.question_text}
+        Question: {repr(question.question_text)}
         Research: {research}
-        Today: {datetime.now().strftime("%Y-%m-%d")}
+        Today: {today_str}
         """)
         draft = await self.get_llm("summarizer", "llm").invoke(draft_prompt)
 
         critique_prompt = clean_indents(f"""
-        You are a skeptical red-team reviewer. Identify weaknesses, missing evidence,
-        overconfident claims, or alternative interpretations in this analysis:
-        {draft}
+        You are a skeptical red-team reviewer. Challenge overconfidence.
+        Is the evidence truly sufficient for such a strong conclusion?
+        What high-impact scenarios are being underweighted?
         """)
         critique = await self.get_llm("critiquer", "llm").invoke(critique_prompt)
 
         final_prompt = clean_indents(f"""
-        Revise the following analysis to address the critique. Maintain a professional,
-        evidence-based tone and explicitly acknowledge key uncertainties.
+        Revise the analysis: keep bold conclusions ONLY if they survive scrutiny.
+        Explicitly state when the evidence justifies high confidence vs. when uncertainty remains.
+        Never claim certainty unless logically necessary.
 
         Original Analysis:
         {draft}
@@ -131,97 +150,119 @@ class ConservativeHybridBot(ForecastBot):
         if model_override:
             self._llms["default"] = GeneralLlm(model=model_override)
 
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
         try:
             if isinstance(question, BinaryQuestion):
                 prompt = clean_indents(f"""
-                Conservative professional forecaster.
+                You are a confident, evidence-driven forecaster.
+                Make a decisive probability assessment—even if it strongly deviates from base rates.
+                ONLY assign extreme probabilities (≤0.1% or ≥99.9%) if the outcome is virtually certain or impossible.
 
-                Question: {question.question_text}
-                Background: {question.background_info}
-                Resolution: {question.resolution_criteria}
-                Fine print: {question.fine_print}
+                Question: {repr(question.question_text)}
+                Background: {repr(question.background_info or 'None')}
+                Resolution: {repr(question.resolution_criteria or 'None')}
+                Fine print: {repr(question.fine_print or 'None')}
                 Narrative: {narrative}
                 Research: {research}
-                Today: {datetime.now().strftime("%Y-%m-%d")}
-
-                Favor status quo. Avoid overconfidence.
+                Today: {today_str}
 
                 End with: "Probability: ZZ%"
                 """)
                 reasoning = await self.get_llm("default", "llm").invoke(prompt)
-                pred: BinaryPrediction = await structure_output(reasoning, BinaryPrediction, model=self.get_llm("parser", "llm"))
-                result = max(0.01, min(0.99, pred.prediction_in_decimal))
+                try:
+                    pred: BinaryPrediction = await structure_output(
+                        reasoning, BinaryPrediction, model=self.get_llm("parser", "llm")
+                    )
+                    # Allow bolder range: [0.001, 0.999]
+                    result = max(0.001, min(0.999, pred.prediction_in_decimal))
+                except Exception as e:
+                    logger.warning(f"Failed to parse binary prediction: {e}. Using 0.5.")
+                    result = 0.5
+                    reasoning += f"\n[PARSING FAILED: {e}]"
 
             elif isinstance(question, MultipleChoiceQuestion):
+                options_repr = repr(question.options)
                 prompt = clean_indents(f"""
-                Question: {question.question_text}
-                Options: {question.options}
+                Assign decisive probabilities based on evidence—even if one option dominates.
+                Avoid uniformity unless truly no signal exists.
+                Zero probability ONLY if logically impossible.
+
+                Question: {repr(question.question_text)}
+                Options: {options_repr}
                 Narrative: {narrative}
                 Research: {research}
-                Today: {datetime.now().strftime("%Y-%m-%d")}
-
-                Assign probabilities. No 0% unless logically impossible.
-
-                End with probabilities for each option in order.
+                Today: {today_str}
                 """)
                 reasoning = await self.get_llm("default", "llm").invoke(prompt)
-                result = await structure_output(
-                    reasoning, PredictedOptionList, model=self.get_llm("parser", "llm"),
-                    additional_instructions=f"Options must be exactly: {question.options}"
-                )
+                try:
+                    result = await structure_output(
+                        reasoning, PredictedOptionList, model=self.get_llm("parser", "llm"),
+                        additional_instructions=f"Options must be exactly: {options_repr}"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to parse MC prediction: {e}. Using uniform.")
+                    uniform_prob = 1.0 / len(question.options)
+                    result = PredictedOptionList([
+                        {"option": opt, "probability": uniform_prob} for opt in question.options
+                    ])
+                    reasoning += f"\n[PARSING FAILED: {e}]"
 
             elif isinstance(question, NumericQuestion):
-                # Extract numbers using regex (no external deps)
-                numbers = re.findall(r'\b\d+\.?\d*\b', research)
-                float_numbers = []
-                for n in numbers:
-                    try:
-                        val = float(n)
-                        # Skip years (2000–2100) and extremely large outliers
-                        if 0 <= val <= 1e9 and not (2000 <= val <= 2100):
-                            float_numbers.append(val)
-                    except ValueError:
-                        continue
-                
-                if float_numbers:
-                    numbers_str = ", ".join(f"{x:g}" for x in float_numbers[:5])
-                    research += f"\n\nExtracted relevant numbers: {numbers_str}"
-
                 lower_msg = f"Lower bound: {'open' if question.open_lower_bound else 'closed'} at {question.lower_bound or question.nominal_lower_bound}"
                 upper_msg = f"Upper bound: {'open' if question.open_upper_bound else 'closed'} at {question.upper_bound or question.nominal_upper_bound}"
                 prompt = clean_indents(f"""
-                Conservative forecaster. Set wide 90/10 intervals.
+                You may assign narrow intervals IF the narrative shows high confidence.
+                Otherwise, default to wide, conservative intervals.
+                Justify tight forecasts with specific evidence.
 
-                Question: {question.question_text}
-                Units: {question.unit_of_measure or 'Infer'}
+                Question: {repr(question.question_text)}
+                Units: {repr(question.unit_of_measure or 'Infer')}
                 Narrative: {narrative}
                 Research: {research}
                 {lower_msg}
                 {upper_msg}
-                Today: {datetime.now().strftime("%Y-%m-%d")}
+                Today: {today_str}
 
                 Provide percentiles: 10, 20, 40, 60, 80, 90.
                 """)
                 reasoning = await self.get_llm("default", "llm").invoke(prompt)
-                percentile_list: list[Percentile] = await structure_output(reasoning, list[Percentile], model=self.get_llm("parser", "llm"))
-                result = NumericDistribution.from_question(percentile_list, question)
+                try:
+                    percentile_list: list[Percentile] = await structure_output(
+                        reasoning, list[Percentile], model=self.get_llm("parser", "llm")
+                    )
+                    result = NumericDistribution.from_question(percentile_list, question)
+                except Exception as e:
+                    logger.warning(f"Failed to parse numeric prediction: {e}. Using fallback.")
+                    lb = question.nominal_lower_bound or 0
+                    ub = question.nominal_upper_bound or 100
+                    if question.open_lower_bound:
+                        lb = ub - 1000 if ub else -1000
+                    if question.open_upper_bound:
+                        ub = lb + 1000 if lb else 1000
+                    mid = (lb + ub) / 2
+                    fallback_percentiles = [
+                        Percentile(percentile=0.1, value=lb),
+                        Percentile(percentile=0.2, value=lb + (mid - lb) * 0.3),
+                        Percentile(percentile=0.4, value=mid - (ub - mid) * 0.3),
+                        Percentile(percentile=0.6, value=mid + (ub - mid) * 0.3),
+                        Percentile(percentile=0.8, value=ub - (ub - mid) * 0.3),
+                        Percentile(percentile=0.9, value=ub),
+                    ]
+                    result = NumericDistribution.from_question(fallback_percentiles, question)
+                    reasoning += f"\n[PARSING FAILED: {e}]"
 
             return result, reasoning
         finally:
             if model_override:
                 self._llms["default"] = original_default
 
+    # Keep the same ensemble logic as before (using _ENSEMBLE_MODELS)
     async def _run_forecast_on_binary(self, question: BinaryQuestion, research: str) -> ReasonedPrediction[float]:
         narrative = await self._generate_narrative(question, research)
         forecasts = []
         reasonings = []
-        models = [
-            "openrouter/openai/gpt-5",
-            "openrouter/openai/gpt-5",
-            "openrouter/anthropic/claude-sonnet-4.5",
-            "openrouter/openai/gpt-4o"
-        ]
-        for model in models:
+        for model in _ENSEMBLE_MODELS:
             pred, reason = await self._single_forecast(question, narrative, research, model_override=model)
             forecasts.append(pred)
             reasonings.append(reason)
@@ -232,13 +273,7 @@ class ConservativeHybridBot(ForecastBot):
         narrative = await self._generate_narrative(question, research)
         forecasts = []
         reasonings = []
-        models = [
-            "openrouter/openai/gpt-5",
-            "openrouter/openai/gpt-5",
-            "openrouter/anthropic/claude-sonnet-4.5",
-            "openrouter/openai/gpt-4o"
-        ]
-        for model in models:
+        for model in _ENSEMBLE_MODELS:
             pred, reason = await self._single_forecast(question, narrative, research, model_override=model)
             forecasts.append(pred)
             reasonings.append(reason)
@@ -258,13 +293,7 @@ class ConservativeHybridBot(ForecastBot):
         narrative = await self._generate_narrative(question, research)
         forecasts = []
         reasonings = []
-        models = [
-            "openrouter/openai/gpt-5",
-            "openrouter/openai/gpt-5",
-            "openrouter/anthropic/claude-sonnet-4.5",
-            "openrouter/openai/gpt-4o"
-        ]
-        for model in models:
+        for model in _ENSEMBLE_MODELS:
             pred, reason = await self._single_forecast(question, narrative, research, model_override=model)
             forecasts.append(pred)
             reasonings.append(reason)
@@ -273,11 +302,13 @@ class ConservativeHybridBot(ForecastBot):
         for p in target_percentiles:
             values = []
             for f in forecasts:
+                matched = False
                 for item in f.declared_percentiles:
                     if abs(item.percentile - p) < 0.01:
                         values.append(item.value)
+                        matched = True
                         break
-                else:
+                if not matched:
                     values.append(0.0)
             median_val = float(np.median(values))
             aggregated.append(Percentile(percentile=p, value=median_val))
@@ -286,7 +317,7 @@ class ConservativeHybridBot(ForecastBot):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run Enhanced Conservative Hybrid Bot.")
+    parser = argparse.ArgumentParser(description="Run Confident Conservative Hybrid Bot.")
     parser.add_argument(
         "--tournament-ids",
         nargs="+",
@@ -295,7 +326,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    bot = ConservativeHybridBot(
+    bot = ConfidentConservativeBot(
         research_reports_per_question=1,
         predictions_per_research_report=1,
         publish_reports_to_metaculus=True,
