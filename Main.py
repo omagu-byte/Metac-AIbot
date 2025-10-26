@@ -1,14 +1,10 @@
-# main.py
-# Confident Conservative Forecasting Bot — Fully Fixed for Multiple-Choice Errors
-
 import argparse
 import asyncio
 import logging
 import re
 from datetime import datetime, timezone
-from typing import List
+from typing import Literal, List
 
-import numpy as np
 from forecasting_tools import (
     BinaryQuestion,
     ForecastBot,
@@ -26,18 +22,13 @@ from forecasting_tools import (
     structure_output,
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger("ConfidentConservativeBot")
-
+logger = logging.getLogger(__name__)
 
 _ENSEMBLE_MODELS: List[str] = [
     "openrouter/openai/gpt-5",
     "openrouter/anthropic/claude-sonnet-4.5",
     "openrouter/openai/gpt-4o",
-    "openrouter/openai/gpt-5",
+    "openrouter/openai/gpt-5",  # weighted twice
 ]
 
 
@@ -48,9 +39,9 @@ class ConfidentConservativeBot(ForecastBot):
     def _llm_config_defaults(self) -> dict[str, str]:
         return {
             "default": "openrouter/openai/gpt-5",
-            "parser": "openrouter/openai/gpt-4.1-mini",
+            "parser": "openrouter/openai/gpt-4o-mini",
             "summarizer": "openrouter/openai/gpt-5",
-            "researcher": "openrouter/openai/gpt-5",
+            "researcher": "openrouter/perplexity/llama-3.1-sonar-large-128k-online",
             "critiquer": "openrouter/openai/gpt-5",
         }
 
@@ -99,7 +90,7 @@ class ConfidentConservativeBot(ForecastBot):
                 {v}
                 """)
                 tasks.append(self.get_llm("researcher", "llm").invoke(prompt))
-            
+
             results = await asyncio.gather(*tasks, return_exceptions=True)
             safe_results = []
             for i, r in enumerate(results):
@@ -156,216 +147,238 @@ class ConfidentConservativeBot(ForecastBot):
                 prompt = clean_indents(f"""
                 You are a confident, evidence-driven forecaster.
                 Make a decisive probability assessment—even if it strongly deviates from base rates.
-                ONLY assign extreme probabilities (≤0.1% or ≥99.9%) if the outcome is virtually certain or impossible.
+                ONLY assign extreme probabilities (≤0.1% or ≥99.9%) if the evidence is overwhelming and near-certain.
 
-                Question: {repr(question.question_text)}
-                Background: {repr(question.background_info or 'None')}
-                Resolution: {repr(question.resolution_criteria or 'None')}
-                Fine print: {repr(question.fine_print or 'None')}
-                Narrative: {narrative}
-                Research: {research}
+                Question: {question.question_text}
+                Background: {question.background_info}
+                Resolution Criteria: {question.resolution_criteria}
+                Fine Print: {question.fine_print}
+                Research Summary: {narrative}
                 Today: {today_str}
 
+                Before answering, consider:
+                (a) Time until resolution
+                (b) Status quo trajectory
+                (c) Plausible Yes and No scenarios
                 End with: "Probability: ZZ%"
                 """)
                 reasoning = await self.get_llm("default", "llm").invoke(prompt)
-                try:
-                    pred: BinaryPrediction = await structure_output(
-                        reasoning, BinaryPrediction, model=self.get_llm("parser", "llm")
-                    )
-                    result = max(0.001, min(0.999, pred.prediction_in_decimal))
-                except Exception as e:
-                    logger.warning(f"Failed to parse binary prediction: {e}. Using 0.5.")
-                    result = 0.5
-                    reasoning += f"\n[PARSING FAILED: {e}]"
+                pred: BinaryPrediction = await structure_output(
+                    reasoning, BinaryPrediction, model=self.get_llm("parser", "llm")
+                )
+                decimal_pred = max(0.001, min(0.999, pred.prediction_in_decimal))
+                return ReasonedPrediction(prediction_value=decimal_pred, reasoning=reasoning)
 
             elif isinstance(question, MultipleChoiceQuestion):
-                options_repr = repr(question.options)
                 prompt = clean_indents(f"""
-                Assign precise decimal probabilities to EACH option that SUM EXACTLY TO 1.0.
-                - Use numbers like 0.75, not "high" or "medium".
-                - Do NOT assign probabilities that sum to more or less than 1.0.
-                - Zero probability ONLY if logically impossible.
+                You are a confident, evidence-driven forecaster.
+                Assign probabilities to each option based on the narrative. Avoid uniform distributions unless truly ignorant.
 
-                Question: {repr(question.question_text)}
-                Options: {options_repr}
-                Narrative: {narrative}
-                Research: {research}
+                Question: {question.question_text}
+                Options: {question.options}
+                Background: {question.background_info}
+                Resolution Criteria: {question.resolution_criteria}
+                Fine Print: {question.fine_print}
+                Research Summary: {narrative}
                 Today: {today_str}
 
-                Output ONLY the final probabilities in a valid JSON format.
+                Before answering, consider status quo and plausible surprises.
+                End with probabilities in this exact format:
+                Option_A: Probability_A
+                Option_B: Probability_B
+                ...
                 """)
+                parsing_instructions = f"Valid options: {question.options}"
                 reasoning = await self.get_llm("default", "llm").invoke(prompt)
-                try:
-                    result: PredictedOptionList = await structure_output(
-                        reasoning,
-                        PredictedOptionList,
-                        model=self.get_llm("parser", "llm"),
-                        additional_instructions=(
-                            f"Options must be exactly: {options_repr}. "
-                            "Probabilities MUST sum to 1.0. Use field 'option_name', not 'option'."
-                        )
-                    )
-                    # Validate and normalize if needed
-                    probs = [opt.probability for opt in result.predicted_options]
-                    total = sum(probs)
-                    if abs(total - 1.0) > 0.05:
-                        raise ValueError(f"Probabilities sum to {total:.3f}, which is too far from 1.0")
-                    elif abs(total - 1.0) > 1e-6:
-                        # Normalize minor floating-point errors
-                        normalized = [p / total for p in probs]
-                        result = PredictedOptionList([
-                            {"option_name": opt.option_name, "probability": float(p)}
-                            for opt, p in zip(result.predicted_options, normalized)
-                        ])
-                except Exception as e:
-                    logger.warning(f"Failed to parse or validate MC prediction: {e}. Using uniform fallback.")
-                    uniform_prob = 1.0 / len(question.options)
-                    result = PredictedOptionList([
-                        {"option_name": opt, "probability": uniform_prob} for opt in question.options
-                    ])
-                    reasoning += f"\n[PARSING FAILED: {e}]"
+                pred: PredictedOptionList = await structure_output(
+                    reasoning,
+                    PredictedOptionList,
+                    model=self.get_llm("parser", "llm"),
+                    additional_instructions=parsing_instructions,
+                )
+                return ReasonedPrediction(prediction_value=pred, reasoning=reasoning)
 
             elif isinstance(question, NumericQuestion):
-                lower_msg = f"Lower bound: {'open' if question.open_lower_bound else 'closed'} at {question.lower_bound or question.nominal_lower_bound}"
-                upper_msg = f"Upper bound: {'open' if question.open_upper_bound else 'closed'} at {question.upper_bound or question.nominal_upper_bound}"
+                upper_msg, lower_msg = self._create_upper_and_lower_bound_messages(question)
                 prompt = clean_indents(f"""
-                You may assign narrow intervals IF the narrative shows high confidence.
-                Otherwise, default to wide, conservative intervals.
-                Justify tight forecasts with specific evidence.
+                You are a confident, evidence-driven forecaster.
+                Provide a calibrated numeric forecast with wide but justified intervals.
 
-                Question: {repr(question.question_text)}
-                Units: {repr(question.unit_of_measure or 'Infer')}
-                Narrative: {narrative}
-                Research: {research}
+                Question: {question.question_text}
+                Units: {question.unit_of_measure or 'Infer from context'}
+                Background: {question.background_info}
+                Resolution Criteria: {question.resolution_criteria}
+                Fine Print: {question.fine_print}
+                Research Summary: {narrative}
+                Today: {today_str}
                 {lower_msg}
                 {upper_msg}
-                Today: {today_str}
 
-                Provide percentiles: 10, 20, 40, 60, 80, 90.
+                Consider status quo, trends, expert views, and tail risks.
+                End with:
+                Percentile 10: XX
+                Percentile 20: XX
+                Percentile 40: XX
+                Percentile 60: XX
+                Percentile 80: XX
+                Percentile 90: XX
                 """)
                 reasoning = await self.get_llm("default", "llm").invoke(prompt)
-                try:
-                    percentile_list: list[Percentile] = await structure_output(
-                        reasoning, list[Percentile], model=self.get_llm("parser", "llm")
-                    )
-                    result = NumericDistribution.from_question(percentile_list, question)
-                except Exception as e:
-                    logger.warning(f"Failed to parse numeric prediction: {e}. Using fallback.")
-                    lb = question.nominal_lower_bound or 0
-                    ub = question.nominal_upper_bound or 100
-                    if question.open_lower_bound:
-                        lb = ub - 1000 if ub else -1000
-                    if question.open_upper_bound:
-                        ub = lb + 1000 if lb else 1000
-                    mid = (lb + ub) / 2
-                    fallback_percentiles = [
-                        Percentile(percentile=0.1, value=lb),
-                        Percentile(percentile=0.2, value=lb + (mid - lb) * 0.3),
-                        Percentile(percentile=0.4, value=mid - (ub - mid) * 0.3),
-                        Percentile(percentile=0.6, value=mid + (ub - mid) * 0.3),
-                        Percentile(percentile=0.8, value=ub - (ub - mid) * 0.3),
-                        Percentile(percentile=0.9, value=ub),
-                    ]
-                    result = NumericDistribution.from_question(fallback_percentiles, question)
-                    reasoning += f"\n[PARSING FAILED: {e}]"
+                percentiles: list[Percentile] = await structure_output(
+                    reasoning, list[Percentile], model=self.get_llm("parser", "llm")
+                )
+                dist = NumericDistribution.from_question(percentiles, question)
+                return ReasonedPrediction(prediction_value=dist, reasoning=reasoning)
 
-            return result, reasoning
         finally:
-            if model_override:
+            if model_override and original_default:
                 self._llms["default"] = original_default
 
-    async def _run_forecast_on_binary(self, question: BinaryQuestion, research: str) -> ReasonedPrediction[float]:
+    async def _run_forecast_on_binary(
+        self, question: BinaryQuestion, research: str
+    ) -> ReasonedPrediction[float]:
         narrative = await self._generate_narrative(question, research)
-        forecasts = []
-        reasonings = []
-        for model in _ENSEMBLE_MODELS:
-            pred, reason = await self._single_forecast(question, narrative, research, model_override=model)
-            forecasts.append(pred)
-            reasonings.append(reason)
-        median_pred = float(np.median(forecasts))
-        return ReasonedPrediction(prediction_value=median_pred, reasoning=" | ".join(reasonings))
+        forecasts = await asyncio.gather(*[
+            self._single_forecast(question, narrative, research, model) for model in _ENSEMBLE_MODELS
+        ], return_exceptions=True)
 
-    async def _run_forecast_on_multiple_choice(self, question: MultipleChoiceQuestion, research: str) -> ReasonedPrediction[PredictedOptionList]:
+        valid_forecasts = [f for f in forecasts if not isinstance(f, Exception)]
+        if not valid_forecasts:
+            raise RuntimeError("All ensemble forecasts failed")
+
+        avg_pred = sum(f.prediction_value for f in valid_forecasts) / len(valid_forecasts)
+        combined_reasoning = "\n\n=== ENSEMBLE ===\n".join(f.reasoning for f in valid_forecasts)
+        return ReasonedPrediction(prediction_value=avg_pred, reasoning=combined_reasoning)
+
+    async def _run_forecast_on_multiple_choice(
+        self, question: MultipleChoiceQuestion, research: str
+    ) -> ReasonedPrediction[PredictedOptionList]:
         narrative = await self._generate_narrative(question, research)
-        forecasts = []
-        reasonings = []
-        for model in _ENSEMBLE_MODELS:
-            pred, reason = await self._single_forecast(question, narrative, research, model_override=model)
-            forecasts.append(pred)
-            reasonings.append(reason)
-        # FIX: Use .probability (not ["probability"]) — PredictedOption is a Pydantic model
-        all_probs = np.array([[opt.probability for opt in f.predicted_options] for f in forecasts])
-        median_probs = np.median(all_probs, axis=0)
-        if median_probs.sum() > 0:
-            median_probs = median_probs / median_probs.sum()
-        else:
-            median_probs = np.full_like(median_probs, 1.0 / len(median_probs))
-        # FIX: Use .option_name and construct with "option_name"
-        reference_forecast = forecasts[0]
-        median_forecast = PredictedOptionList([
-            {"option_name": opt.option_name, "probability": float(p)}
-            for opt, p in zip(reference_forecast.predicted_options, median_probs)
+        forecasts = await asyncio.gather(*[
+            self._single_forecast(question, narrative, research, model) for model in _ENSEMBLE_MODELS
+        ], return_exceptions=True)
+
+        valid_forecasts = [f for f in forecasts if not isinstance(f, Exception)]
+        if not valid_forecasts:
+            raise RuntimeError("All ensemble forecasts failed")
+
+        avg_probs = {}
+        for opt in question.options:
+            total = sum(f.prediction_value.get_probability_for_option(opt) for f in valid_forecasts)
+            avg_probs[opt] = total / len(valid_forecasts)
+
+        from forecasting_tools import PredictedOption
+        avg_list = PredictedOptionList(predicted_options=[
+            PredictedOption(option=opt, probability=prob) for opt, prob in avg_probs.items()
         ])
-        return ReasonedPrediction(prediction_value=median_forecast, reasoning=" | ".join(reasonings))
+        combined_reasoning = "\n\n=== ENSEMBLE ===\n".join(f.reasoning for f in valid_forecasts)
+        return ReasonedPrediction(prediction_value=avg_list, reasoning=combined_reasoning)
 
-    async def _run_forecast_on_numeric(self, question: NumericQuestion, research: str) -> ReasonedPrediction[NumericDistribution]:
+    async def _run_forecast_on_numeric(
+        self, question: NumericQuestion, research: str
+    ) -> ReasonedPrediction[NumericDistribution]:
         narrative = await self._generate_narrative(question, research)
-        forecasts = []
-        reasonings = []
-        for model in _ENSEMBLE_MODELS:
-            pred, reason = await self._single_forecast(question, narrative, research, model_override=model)
-            forecasts.append(pred)
-            reasonings.append(reason)
-        target_percentiles = [0.1, 0.2, 0.4, 0.6, 0.8, 0.9]
-        aggregated = []
-        for p in target_percentiles:
-            values = []
-            for f in forecasts:
-                matched = False
-                for item in f.declared_percentiles:
-                    if abs(item.percentile - p) < 0.01:
-                        values.append(item.value)
-                        matched = True
-                        break
-                if not matched:
-                    values.append(0.0)
-            median_val = float(np.median(values))
-            aggregated.append(Percentile(percentile=p, value=median_val))
-        distribution = NumericDistribution.from_question(aggregated, question)
-        return ReasonedPrediction(prediction_value=distribution, reasoning=" | ".join(reasonings))
+        forecasts = await asyncio.gather(*[
+            self._single_forecast(question, narrative, research, model) for model in _ENSEMBLE_MODELS
+        ], return_exceptions=True)
+
+        valid_forecasts = [f for f in forecasts if not isinstance(f, Exception)]
+        if not valid_forecasts:
+            raise RuntimeError("All ensemble forecasts failed")
+
+        avg_percentiles = []
+        for i, p in enumerate([10, 20, 40, 60, 80, 90]):
+            values = [f.prediction_value.declared_percentiles[i].value for f in valid_forecasts]
+            avg_val = sum(values) / len(values)
+            avg_percentiles.append(Percentile(percentile=p, value=avg_val))
+
+        avg_dist = NumericDistribution.from_question(avg_percentiles, question)
+        combined_reasoning = "\n\n=== ENSEMBLE ===\n".join(f.reasoning for f in valid_forecasts)
+        return ReasonedPrediction(prediction_value=avg_dist, reasoning=combined_reasoning)
+
+    def _create_upper_and_lower_bound_messages(
+        self, question: NumericQuestion
+    ) -> tuple[str, str]:
+        if question.nominal_upper_bound is not None:
+            upper_bound_number = question.nominal_upper_bound
+        else:
+            upper_bound_number = question.upper_bound
+        if question.nominal_lower_bound is not None:
+            lower_bound_number = question.nominal_lower_bound
+        else:
+            lower_bound_number = question.lower_bound
+
+        if question.open_upper_bound:
+            upper_bound_message = f"The question creator thinks the number is likely not higher than {upper_bound_number}."
+        else:
+            upper_bound_message = f"The outcome cannot be higher than {upper_bound_number}."
+
+        if question.open_lower_bound:
+            lower_bound_message = f"The question creator thinks the number is likely not lower than {lower_bound_number}."
+        else:
+            lower_bound_message = f"The outcome cannot be lower than {lower_bound_number}."
+        return upper_bound_message, lower_bound_message
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run Confident Conservative Hybrid Bot.")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+
+    litellm_logger = logging.getLogger("LiteLLM")
+    litellm_logger.setLevel(logging.WARNING)
+    litellm_logger.propagate = False
+
+    parser = argparse.ArgumentParser(
+        description="Run ConfidentConservativeBot on tournaments 32813, 32831, and MiniBench"
+    )
     parser.add_argument(
-    "--tournament-ids",
-    nargs="+",
-    type=str,
-    default=[
-        "32813",
-        "market-pulse-25q4",
-        "fiscal",
-        "metaculus-cup-fall-2025",
-        MetaculusApi.CURRENT_MINIBENCH_ID,
-    ],
+        "--mode",
+        type=str,
+        choices=["tournaments", "test_questions"],
+        default="tournaments",
+        help="Mode: 'tournaments' (32813, 32831, MiniBench) or 'test_questions'",
     )
     args = parser.parse_args()
 
     bot = ConfidentConservativeBot(
         research_reports_per_question=1,
         predictions_per_research_report=1,
+        use_research_summary_to_forecast=False,
         publish_reports_to_metaculus=True,
+        folder_to_save_reports_to=None,
         skip_previously_forecasted_questions=True,
     )
 
-    try:
-        all_reports = []
-        for tid in args.tournament_ids:
-            logger.info(f"Forecasting on tournament: {tid}")
-            reports = asyncio.run(bot.forecast_on_tournament(tid, return_exceptions=True))
-            all_reports.extend(reports)
-        bot.log_report_summary(all_reports)
-        logger.info("Run completed successfully.")
-    except Exception as e:
-        logger.error(f"Critical error: {e}", exc_info=True)
+    if args.mode == "tournaments":
+        logger.info("Forecasting on Tournament 32813...")
+        reports_32813 = asyncio.run(bot.forecast_on_tournament(32813, return_exceptions=True))
+
+        logger.info("Forecasting on Tournament 32831...")
+        reports_32831 = asyncio.run(bot.forecast_on_tournament(32831, return_exceptions=True))
+
+        logger.info("Forecasting on MiniBench...")
+        reports_minibench = asyncio.run(
+            bot.forecast_on_tournament(MetaculusApi.CURRENT_MINIBENCH_ID, return_exceptions=True)
+        )
+
+        forecast_reports = reports_32813 + reports_32831 + reports_minibench
+
+    elif args.mode == "test_questions":
+        # Corrected example questions based on knowledge base
+        EXAMPLE_QUESTIONS = [
+            "https://www.metaculus.com/questions/578/human-extinction-by-2100/",  # Binary
+            "https://www.metaculus.com/questions/14333/age-of-oldest-human-as-of-2100/",  # Numeric
+            "https://www.metaculus.com/questions/22427/number-of-new-leading-ai-labs/",  # Multiple choice
+            "https://www.metaculus.com/c/diffusion-community/38880/how-many-us-labor-strikes-due-to-ai-in-2029/",  # Numeric (discrete)
+        ]
+        bot.skip_previously_forecasted_questions = False
+        questions = [
+            MetaculusApi.get_question_by_url(url.strip()) for url in EXAMPLE_QUESTIONS
+        ]
+        forecast_reports = asyncio.run(
+            bot.forecast_questions(questions, return_exceptions=True)
+        )
+
+    bot.log_report_summary(forecast_reports)
