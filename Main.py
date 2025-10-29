@@ -41,7 +41,7 @@ class ConfidentConservativeBot(ForecastBot):
             "default": "openrouter/openai/gpt-5",
             "parser": "openrouter/openai/gpt-4o-mini",
             "summarizer": "openrouter/openai/gpt-5",
-            "researcher": "openrouter/perplexity/llama-3.1-sonar-large-128k-online",
+            "researcher": "openrouter/openai/gpt-5",
             "critiquer": "openrouter/openai/gpt-5",
         }
 
