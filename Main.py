@@ -1,6 +1,7 @@
 # main.py
 # Conservative Hybrid Forecasting Bot — Tournament-Only, OpenRouter-Only
 # Research powered solely by GPT-5 and Claude Sonnet 4.5
+# No external APIs. No numpy. No requests. No news.
 
 import argparse
 import asyncio
@@ -9,7 +10,6 @@ import os
 from datetime import datetime
 from typing import List
 
-import requests
 from forecasting_tools import (
     BinaryQuestion,
     ForecastBot,
@@ -163,7 +163,7 @@ class Yrambot(ForecastBot):
             """)
             reasoning = await self.get_llm("default", "llm").invoke(prompt)
             pred: BinaryPrediction = await structure_output(reasoning, BinaryPrediction, model=self.get_llm("parser", "llm"))
-            result = max(0.01, min(0.99, pred.prediction_in_decimal))
+            result = max(0.01, min(0.99, pred.prediction_in_decimal)
 
         elif isinstance(question, MultipleChoiceQuestion):
             prompt = clean_indents(f"""
