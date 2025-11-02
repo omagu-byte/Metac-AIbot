@@ -1,8 +1,3 @@
-# main.py
-# Conservative Hybrid Forecasting Bot — Tournament-Only, OpenRouter-Only
-# Research powered solely by GPT-5 and Claude Sonnet 4.5
-# No external APIs. No numpy. No requests. No news.
-
 import argparse
 import asyncio
 import logging
@@ -31,7 +26,6 @@ from forecasting_tools import (
 # Helper: Pure-Python median
 # -----------------------------
 def median(lst: List[float]) -> float:
-    """Compute the median of a list of numbers without numpy."""
     if not lst:
         raise ValueError("median() arg is an empty sequence")
     sorted_lst = sorted(lst)
@@ -43,7 +37,7 @@ def median(lst: List[float]) -> float:
         return float(sorted_lst[mid])
 
 # -----------------------------
-# Logging setup
+# Logging
 # -----------------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -54,7 +48,7 @@ logger = logging.getLogger("Yrambot")
 
 class Yrambot(ForecastBot):
     """
-    Yrambot: Conservative hybrid forecaster using only GPT-5 and Claude Sonnet 4.5.
+    Conservative hybrid forecaster using only GPT-5 and Claude Sonnet 4.5.
     No external news or web search — relies on model knowledge with strong temporal awareness.
     """
 
@@ -65,54 +59,50 @@ class Yrambot(ForecastBot):
         return {
             "default": "openrouter/openai/gpt-5",
             "parser": "openrouter/openai/gpt-4.1-mini",
-            "summarizer": "openrouter/openai/gpt-5",
             "researcher_gpt": "openrouter/openai/gpt-5",
             "researcher_claude": "openrouter/anthropic/claude-sonnet-4.5",
         }
 
-    # -----------------------------
-    # Dual-Model Research (GPT-5 + Claude Sonnet)
-    # -----------------------------
     async def run_research(self, question: MetaculusQuestion) -> str:
         async with self._concurrency_limiter:
             today_str = datetime.now().strftime("%Y-%m-%d")
             
             gpt_prompt = clean_indents(f"""
-            You are an expert researcher with deep world knowledge up to June 2024, but you understand that today is {today_str}.
-            Analyze the following forecasting question with attention to recent developments, trends, and timing.
+                You are an expert researcher with deep world knowledge up to June 2024, but you understand that today is {today_str}.
+                Analyze the following forecasting question with attention to recent developments, trends, and timing.
 
-            Question: {question.question_text}
-            Background: {question.background_info or 'None provided'}
-            Resolution criteria: {question.resolution_criteria or 'Standard'}
-            Fine print: {question.fine_print or 'None'}
+                Question: {question.question_text}
+                Background: {question.background_info or 'None provided'}
+                Resolution criteria: {question.resolution_criteria or 'Standard'}
+                Fine print: {question.fine_print or 'None'}
 
-            Consider:
-            - How much time remains until resolution?
-            - Has anything changed recently that affects this outcome?
-            - What is the status quo? (World changes slowly.)
-            - Are there known upcoming events (elections, product launches, policy deadlines)?
-            - If uncertain, say so. Do not hallucinate.
+                Consider:
+                - How much time remains until resolution?
+                - Has anything changed recently that affects this outcome?
+                - What is the status quo? (World changes slowly.)
+                - Are there known upcoming events (elections, product launches, policy deadlines)?
+                - If uncertain, say so. Do not hallucinate.
 
-            Provide a concise, factual summary for a professional forecaster.
+                Provide a concise, factual summary for a professional forecaster.
             """)
             
             claude_prompt = clean_indents(f"""
-            You are Claude Sonnet 4.5, a precise and cautious AI with knowledge cutoff in early 2024, but aware that today is {today_str}.
-            Your task: analyze the forecasting question below with strong temporal reasoning.
+                You are Claude Sonnet 4.5, a precise and cautious AI with knowledge cutoff in early 2024, but aware that today is {today_str}.
+                Your task: analyze the forecasting question below with strong temporal reasoning.
 
-            Question: {question.question_text}
-            Context: {question.background_info or 'Not specified'}
-            Resolution rules: {question.resolution_criteria or 'Default'}
+                Question: {question.question_text}
+                Context: {question.background_info or 'Not specified'}
+                Resolution rules: {question.resolution_criteria or 'Default'}
 
-            Focus on:
-            - Recency: Is this question about a near-term or long-term event?
-            - Plausibility given current date ({today_str})
-            - Base rates and historical analogs
-            - Known constraints or scheduled events before resolution
+                Focus on:
+                - Recency: Is this question about a near-term or long-term event?
+                - Plausibility given current date ({today_str})
+                - Base rates and historical analogs
+                - Known constraints or scheduled events before resolution
 
-            Be honest about uncertainty. Avoid speculation beyond your knowledge.
+                Be honest about uncertainty. Avoid speculation beyond your knowledge.
 
-            Output only relevant facts and reasoned considerations.
+                Output only relevant facts and reasoned considerations.
             """)
 
             try:
@@ -130,20 +120,12 @@ class Yrambot(ForecastBot):
                 f"--- RESEARCH FROM CLAUDE SONNET 4.5 (as of {today_str}) ---\n{claude_response}\n"
             )
 
-    # -----------------------------
-    # Conservative Forecasting with Committee 
-    # -----------------------------
-    async def _single_forecast(self, question, research: str, model_override: str = None):
-        if model_override:
-            self._llms["default"] = GeneralLlm(model=model_override)
-            self._llms["parser"] = GeneralLlm(model="openrouter/openai/gpt-4.1-mini")
-
-        today_str = datetime.now().strftime("%Y-%m-%d")
-
-        if isinstance(question, BinaryQuestion):
-            prompt = clean_indents(f"""
+    async def _run_forecast_on_binary(
+        self, question: BinaryQuestion, research: str
+    ) -> ReasonedPrediction[float]:
+        prompt = clean_indents(f"""
             You are a professional forecaster known for conservative, well-calibrated predictions.
-            Today is {today_str}.
+            Today is {datetime.now().strftime('%Y-%m-%d')}.
 
             Question: {question.question_text}
             Background: {question.background_info}
@@ -152,179 +134,211 @@ class Yrambot(ForecastBot):
             Research: {research}
 
             Consider:
-            (a) Time until resolution — near-term vs long-term
+            (a) Time until resolution
             (b) Status quo bias — the world changes slowly
-            (c) Base rates (e.g., ~30% for major geopolitical disruptions)
+            (c) Base rates
             (d) Model disagreements in research
 
-            Be humble. Avoid overconfidence. Anchor to community estimates if known.
+            Be humble. Avoid overconfidence.
 
-            End with: "Probability: ZZ%"
-            """)
-            reasoning = await self.get_llm("default", "llm").invoke(prompt)
-            pred: BinaryPrediction = await structure_output(reasoning, BinaryPrediction, model=self.get_llm("parser", "llm"))
-            result = max(0.01, min(0.99, pred.prediction_in_decimal))
+            The last thing you write is your final answer as: "Probability: ZZ%", 0–100
+        """)
+        reasoning = await self.get_llm("default", "llm").invoke(prompt)
+        binary_pred: BinaryPrediction = await structure_output(
+            reasoning, BinaryPrediction, model=self.get_llm("parser", "llm")
+        )
+        decimal_pred = max(0.01, min(0.99, binary_pred.prediction_in_decimal))
+        return ReasonedPrediction(prediction_value=decimal_pred, reasoning=reasoning)
 
-        elif isinstance(question, MultipleChoiceQuestion):
-            prompt = clean_indents(f"""
-            Conservative forecaster mode. Today: {today_str}.
+    async def _run_forecast_on_multiple_choice(
+        self, question: MultipleChoiceQuestion, research: str
+    ) -> ReasonedPrediction[PredictedOptionList]:
+        prompt = clean_indents(f"""
+            You are a professional forecaster.
 
             Question: {question.question_text}
             Options: {question.options}
             Background: {question.background_info}
-            Resolution: {question.resolution_criteria}
+            Resolution criteria: {question.resolution_criteria}
+            Fine print: {question.fine_print}
             Research: {research}
+            Today: {datetime.now().strftime('%Y-%m-%d')}
 
-            Assign probabilities. Do not assign 0% to any option unless logically impossible.
-            Prefer modest shifts from uniform unless evidence strongly supports otherwise.
+            Before answering:
+            (a) Time until resolution
+            (b) Status quo outcome
+            (c) Unexpected scenario
 
-            End with probabilities for each option in order.
-            """)
-            reasoning = await self.get_llm("default", "llm").invoke(prompt)
-            result = await structure_output(
-                reasoning, PredictedOptionList, model=self.get_llm("parser", "llm"),
-                additional_instructions=f"Options must be exactly: {question.options}"
-            )
+            Remember: leave moderate probability on most options.
 
-        elif isinstance(question, NumericQuestion):
-            lower_msg = f"Lower bound: {'open' if question.open_lower_bound else 'closed'} at {question.lower_bound or question.nominal_lower_bound}"
-            upper_msg = f"Upper bound: {'open' if question.open_upper_bound else 'closed'} at {question.upper_bound or question.nominal_upper_bound}"
-            prompt = clean_indents(f"""
-            Conservative forecaster. Today: {today_str}. Set wide 90/10 intervals.
+            The last thing you write is your final probabilities as:
+            Option_A: XX%
+            Option_B: YY%
+            ...
+        """)
+        parsing_instructions = f"Valid options: {question.options}"
+        reasoning = await self.get_llm("default", "llm").invoke(prompt)
+        pred: PredictedOptionList = await structure_output(
+            reasoning,
+            PredictedOptionList,
+            model=self.get_llm("parser", "llm"),
+            additional_instructions=parsing_instructions,
+        )
+        return ReasonedPrediction(prediction_value=pred, reasoning=reasoning)
+
+    async def _run_forecast_on_numeric(
+        self, question: NumericQuestion, research: str
+    ) -> ReasonedPrediction[NumericDistribution]:
+        lower_msg = f"The outcome cannot be lower than {question.lower_bound}." if not question.open_lower_bound else f"The question creator thinks it's unlikely to be below {question.lower_bound}."
+        upper_msg = f"The outcome cannot be higher than {question.upper_bound}." if not question.open_upper_bound else f"The question creator thinks it's unlikely to be above {question.upper_bound}."
+
+        prompt = clean_indents(f"""
+            You are a professional forecaster.
 
             Question: {question.question_text}
-            Units: {question.unit_of_measure or 'Infer from context'}
             Background: {question.background_info}
-            Resolution: {question.resolution_criteria}
+            Resolution criteria: {question.resolution_criteria}
+            Fine print: {question.fine_print}
+            Units: {question.unit_of_measure or 'Inferred'}
+            Research: {research}
+            Today: {datetime.now().strftime('%Y-%m-%d')}
+
             {lower_msg}
             {upper_msg}
-            Research: {research}
 
-            Consider:
-            - Status quo and recent trends
-            - Expert consensus (if implied in research)
-            - Black swans: allow tail risk but don't overweight
-            - Time horizon: short-term → tighter; long-term → wider
+            Formatting:
+            - Never use scientific notation
+            - Start with smaller number, increase
 
-            Provide percentiles: 10, 20, 40, 60, 80, 90.
-            """)
-            reasoning = await self.get_llm("default", "llm").invoke(prompt)
-            percentile_list: list[Percentile] = await structure_output(reasoning, list[Percentile], model=self.get_llm("parser", "llm"))
-            result = NumericDistribution.from_question(percentile_list, question)
+            Before answering:
+            (a) Time until resolution
+            (b) Outcome if nothing changed
+            (c) Outcome if trend continued
+            (d) Expert/market expectations
+            (e) Low-outcome scenario
+            (f) High-outcome scenario
 
-        if model_override:
-            # Restore defaults
-            self._llms["default"] = GeneralLlm(model="openrouter/openai/gpt-5")
+            The last thing you write is:
+            Percentile 10: X
+            Percentile 20: X
+            Percentile 40: X
+            Percentile 60: X
+            Percentile 80: X
+            Percentile 90: X
+        """)
+        reasoning = await self.get_llm("default", "llm").invoke(prompt)
+        percentile_list: list[Percentile] = await structure_output(
+            reasoning, list[Percentile], model=self.get_llm("parser", "llm")
+        )
+        dist = NumericDistribution.from_question(percentile_list, question)
+        return ReasonedPrediction(prediction_value=dist, reasoning=reasoning)
+
+    # -----------------------------
+    # Override parent to inject committee + median logic
+    # -----------------------------
+    async def _make_prediction(self, question: MetaculusQuestion, research: str):
+        """
+        Override to generate 3 predictions (GPT-5, GPT-4o, Claude) and return median.
+        """
+        models = [
+            "openrouter/openai/gpt-5",
+            "openrouter/openai/gpt-4o",
+            "openrouter/anthropic/claude-sonnet-4.5"
+        ]
+        predictions = []
+        reasonings = []
+
+        for model in models:
+            # Temporarily override default LLM
+            original_default = self._llms.get("default")
+            original_parser = self._llms.get("parser")
+            self._llms["default"] = GeneralLlm(model=model)
             self._llms["parser"] = GeneralLlm(model="openrouter/openai/gpt-4.1-mini")
 
-        return result, reasoning
+            try:
+                if isinstance(question, BinaryQuestion):
+                    pred = await self._run_forecast_on_binary(question, research)
+                elif isinstance(question, MultipleChoiceQuestion):
+                    pred = await self._run_forecast_on_multiple_choice(question, research)
+                elif isinstance(question, NumericQuestion):
+                    pred = await self._run_forecast_on_numeric(question, research)
+                else:
+                    raise ValueError(f"Unsupported question type: {type(question)}")
+                predictions.append(pred.prediction_value)
+                reasonings.append(pred.reasoning)
+            finally:
+                # Restore originals
+                self._llms["default"] = original_default
+                self._llms["parser"] = original_parser
 
-    async def _run_forecast_on_binary(self, question: BinaryQuestion, research: str) -> ReasonedPrediction[float]:
-        forecasts = []
-        reasonings = []
-        models = [
-            "openrouter/openai/gpt-5",
-            "openrouter/openai/gpt-4o",
-            "openrouter/anthropic/claude-sonnet-4.5"
-        ]
-        for model in models:
-            pred, reason = await self._single_forecast(question, research, model_override=model)
-            forecasts.append(pred)
-            reasonings.append(reason)
-        median_pred = median(forecasts)
-        return ReasonedPrediction(prediction_value=median_pred, reasoning=" | ".join(reasonings))
-
-    async def _run_forecast_on_multiple_choice(self, question: MultipleChoiceQuestion, research: str) -> ReasonedPrediction[PredictedOptionList]:
-        forecasts = []
-        reasonings = []
-        models = [
-            "openrouter/openai/gpt-5",
-            "openrouter/openai/gpt-4o",
-            "openrouter/anthropic/claude-sonnet-4.5"
-        ]
-        for model in models:
-            pred, reason = await self._single_forecast(question, research, model_override=model)
-            forecasts.append(pred)
-            reasonings.append(reason)
-
-        num_options = len(forecasts[0].predicted_options)
-        median_probs = []
-        for i in range(num_options):
-            probs = [f.predicted_options[i]["probability"] for f in forecasts]
-            median_probs.append(median(probs))
-
-        total = sum(median_probs)
-        if total > 0:
-            median_probs = [p / total for p in median_probs]
+        # Median aggregation
+        if isinstance(question, BinaryQuestion):
+            median_val = median([p for p in predictions])
+            final_pred = ReasonedPrediction(prediction_value=median_val, reasoning=" | ".join(reasonings))
+        elif isinstance(question, MultipleChoiceQuestion):
+            # Average then median probabilities per option
+            options = question.options
+            avg_probs = {}
+            for opt in options:
+                probs = [dict(p.predicted_options).get(opt, 0) for p in predictions]
+                avg_probs[opt] = median(probs)
+            total = sum(avg_probs.values())
+            if total > 0:
+                avg_probs = {k: v / total for k, v in avg_probs.items()}
+            final_pred = ReasonedPrediction(
+                prediction_value=PredictedOptionList(list(avg_probs.items())),
+                reasoning=" | ".join(reasonings)
+            )
+        elif isinstance(question, NumericQuestion):
+            target_pts = [0.1, 0.2, 0.4, 0.6, 0.8, 0.9]
+            median_percentiles = []
+            for pt in target_pts:
+                vals = []
+                for p in predictions:
+                    for item in p.declared_percentiles:
+                        if abs(item.percentile - pt) < 0.01:
+                            vals.append(item.value)
+                            break
+                median_val = median(vals) if vals else 0.0
+                median_percentiles.append(Percentile(percentile=pt, value=median_val))
+            final_dist = NumericDistribution.from_question(median_percentiles, question)
+            final_pred = ReasonedPrediction(prediction_value=final_dist, reasoning=" | ".join(reasonings))
         else:
-            uniform_prob = 1.0 / len(median_probs)
-            median_probs = [uniform_prob] * len(median_probs)
+            final_pred = predictions[0]
 
-        options = forecasts[0].predicted_options
-        median_forecast = PredictedOptionList([
-            {"option": opt["option"], "probability": float(p)} for opt, p in zip(options, median_probs)
-        ])
-        return ReasonedPrediction(prediction_value=median_forecast, reasoning=" | ".join(reasonings))
-
-    async def _run_forecast_on_numeric(self, question: NumericQuestion, research: str) -> ReasonedPrediction[NumericDistribution]:
-        forecasts = []
-        reasonings = []
-        models = [
-            "openrouter/openai/gpt-5",
-            "openrouter/openai/gpt-4o",
-            "openrouter/anthropic/claude-sonnet-4.5"
-        ]
-        for model in models:
-            pred, reason = await self._single_forecast(question, research, model_override=model)
-            forecasts.append(pred)
-            reasonings.append(reason)
-
-        target_percentiles = [0.1, 0.2, 0.4, 0.6, 0.8, 0.9]
-        aggregated = []
-        for p in target_percentiles:
-            values = []
-            for f in forecasts:
-                matched = False
-                for item in f.declared_percentiles:
-                    if abs(item.percentile - p) < 0.01:
-                        values.append(item.value)
-                        matched = True
-                        break
-                if not matched:
-                    values.append(0.0)
-            median_val = median(values)
-            aggregated.append(Percentile(percentile=p, value=median_val))
-        distribution = NumericDistribution.from_question(aggregated, question)
-        return ReasonedPrediction(prediction_value=distribution, reasoning=" | ".join(reasonings))
+        return final_pred
 
 
 # -----------------------------
-# Entrypoint — Tournament Only
+# MAIN — Tournament Mode
 # -----------------------------
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run Conservative Hybrid Bot (GPT-5 + Claude only).")
+    # Suppress LiteLLM noise
+    litellm_logger = logging.getLogger("LiteLLM")
+    litellm_logger.setLevel(logging.WARNING)
+    litellm_logger.propagate = False
+
+    parser = argparse.ArgumentParser(description="Run Yrambot (GPT-5 + Claude hybrid)")
     parser.add_argument(
         "--tournament-ids",
         nargs="+",
         type=str,
-        default=["32813", "market-pulse-25q4", MetaculusApi.CURRENT_MINIBENCH_ID],
+        default=["32813", "metaculus-cup-fall-2025", "market-pulse-25q4", MetaculusApi.CURRENT_MINIBENCH_ID],
     )
     args = parser.parse_args()
 
     bot = Yrambot(
         research_reports_per_question=1,
-        predictions_per_research_report=1,
+        predictions_per_research_report=1,  # Handled via _make_prediction override
         publish_reports_to_metaculus=True,
         skip_previously_forecasted_questions=True,
     )
 
-    try:
-        all_reports = []
-        for tid in args.tournament_ids:
-            logger.info(f"Forecasting on tournament: {tid}")
-            reports = asyncio.run(bot.forecast_on_tournament(tid, return_exceptions=True))
-            all_reports.extend(reports)
-        bot.log_report_summary(all_reports)
-        logger.info("Run completed successfully.")
-    except Exception as e:
-        logger.error(f"Critical error: {e}", exc_info=True)
+    all_reports = []
+    for tid in args.tournament_ids:
+        logger.info(f"Forecasting on tournament: {tid}")
+        reports = asyncio.run(bot.forecast_on_tournament(tid, return_exceptions=True))
+        all_reports.extend(reports)
+
+    bot.log_report_summary(all_reports)
+    logger.info("✅ Yrambot run completed.")
